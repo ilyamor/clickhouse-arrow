@@ -147,13 +147,10 @@ impl<T: ClientFormat> Connection<T> {
         }
 
         // Establish tcp connection, perform handshake, and spawn io task
-        let state = Arc::new(
-            Self::connect_inner(&addrs, &mut io_task, Arc::clone(&events), &options, metadata)
-                .await?,
-        );
+
 
         #[cfg(feature = "inner_pool")]
-        let mut state = vec![ArcSwap::from(state)];
+        let mut state = vec![];
 
         #[cfg(feature = "inner_pool")]
         if addrs.len() > 0 {
