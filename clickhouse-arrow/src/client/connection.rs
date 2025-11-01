@@ -188,7 +188,7 @@ impl<T: ClientFormat> Connection<T> {
             // Currently only using 2 connections
             // TODO: Provide inner pool configuration option
             #[cfg(feature = "inner_pool")]
-            load_balancer: Arc::new(load::AtomicLoad::new(2)),
+            load_balancer: Arc::new(load::AtomicLoad::new(addrs.len()  as u8)),
         })
     }
 
