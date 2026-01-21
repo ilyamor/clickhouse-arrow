@@ -27,7 +27,8 @@ use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
 use crate::{Error, Result};
 
 /// FLATTENED version for Dynamic columns
-const DYNAMIC_FLATTENED_VERSION: u64 = 2;
+/// Note: In ClickHouse, Dynamic versions are: V1=1, V2=2, FLATTENED=3, V3=4
+const DYNAMIC_FLATTENED_VERSION: u64 = 3;
 
 /// Null discriminator index (num_types = null marker)
 const NULL_DISCRIMINATOR: u8 = 1;
@@ -552,7 +553,7 @@ mod tests {
         serialize_dynamic_async(&mut buffer, &array, &mut state).await.unwrap();
 
         // Check DynamicStructure
-        assert_eq!(&buffer[0..8], &2u64.to_le_bytes()); // Version = 2
+        assert_eq!(&buffer[0..8], &3u64.to_le_bytes()); // Version = 2
         assert_eq!(buffer[8], 1); // 1 variant type
         assert_eq!(buffer[9], 5); // "Int64" length
         assert_eq!(&buffer[10..15], b"Int64");
@@ -575,7 +576,7 @@ mod tests {
         serialize_dynamic_async(&mut buffer, &array, &mut state).await.unwrap();
 
         // Check DynamicStructure
-        assert_eq!(&buffer[0..8], &2u64.to_le_bytes()); // Version = 2
+        assert_eq!(&buffer[0..8], &3u64.to_le_bytes()); // Version = 2
         assert_eq!(buffer[8], 1); // 1 variant type
         assert_eq!(buffer[9], 6); // "String" length
         assert_eq!(&buffer[10..16], b"String");
@@ -599,7 +600,7 @@ mod tests {
         serialize_dynamic_async(&mut buffer, &array, &mut state).await.unwrap();
 
         // Check DynamicStructure
-        assert_eq!(&buffer[0..8], &2u64.to_le_bytes()); // Version = 2
+        assert_eq!(&buffer[0..8], &3u64.to_le_bytes()); // Version = 2
         assert_eq!(buffer[8], 1); // 1 variant type
         assert_eq!(buffer[9], 5); // "Int64" length
         assert_eq!(&buffer[10..15], b"Int64");
@@ -621,6 +622,6 @@ mod tests {
         serialize_dynamic(&mut buffer, &array, &mut state).unwrap();
 
         // Verify basic structure
-        assert_eq!(&buffer[0..8], &2u64.to_le_bytes()); // Version = 2
+        assert_eq!(&buffer[0..8], &3u64.to_le_bytes()); // Version = 2
     }
 }

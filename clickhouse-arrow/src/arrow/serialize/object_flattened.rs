@@ -243,8 +243,8 @@ mod tests {
 
         // After this comes the Dynamic column data for each path
         // Dynamic for "action" starts at byte 24
-        // Check it has version 2 (FLATTENED Dynamic)
-        assert_eq!(&buffer[24..32], &2u64.to_le_bytes());
+        // Check it has version 3 (FLATTENED Dynamic)
+        assert_eq!(&buffer[24..32], &3u64.to_le_bytes());
     }
 
     #[tokio::test]
@@ -328,8 +328,8 @@ mod tests {
         pos += 7;
 
         // ObjectData for "action" - Dynamic column
-        // DynamicStructure version = 2
-        assert_eq!(&buffer[pos..pos + 8], &2u64.to_le_bytes());
+        // DynamicStructure version = 3 (FLATTENED)
+        assert_eq!(&buffer[pos..pos + 8], &3u64.to_le_bytes());
         pos += 8;
 
         // num_types = 1
@@ -363,8 +363,8 @@ mod tests {
         pos += 3;
 
         // ObjectData for "user_id" - Dynamic column
-        // DynamicStructure version = 2
-        assert_eq!(&buffer[pos..pos + 8], &2u64.to_le_bytes());
+        // DynamicStructure version = 3 (FLATTENED)
+        assert_eq!(&buffer[pos..pos + 8], &3u64.to_le_bytes());
         pos += 8;
 
         // num_types = 1
