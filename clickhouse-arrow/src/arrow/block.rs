@@ -114,7 +114,9 @@ impl ProtocolData<RecordBatch, ArrowDeserializerState> for RecordBatch {
             writer.write_string(type_.to_string()).await?;
 
             if revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION {
-                writer.write_u8(0).await?;
+                // Object (JSON) columns require custom serialization prefix (version byte/u64)
+                let has_custom_serialization = matches!(type_, Type::Object);
+                writer.write_u8(u8::from(has_custom_serialization)).await?;
             }
 
             if column.is_empty() {
@@ -186,7 +188,9 @@ impl ProtocolData<RecordBatch, ArrowDeserializerState> for RecordBatch {
             writer.put_string(type_.to_string())?;
 
             if revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION {
-                writer.put_u8(0);
+                // Object (JSON) columns require custom serialization prefix (version byte/u64)
+                let has_custom_serialization = matches!(type_, Type::Object);
+                writer.put_u8(u8::from(has_custom_serialization));
             }
 
             if column.is_empty() {
