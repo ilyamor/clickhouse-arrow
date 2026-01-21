@@ -3,8 +3,9 @@ pub mod block;
 mod builder;
 mod deserialize;
 pub mod json_assembly;
+pub mod json_flatten;
 pub(crate) mod schema;
-mod serialize;
+pub(crate) mod serialize;
 pub(crate) mod types;
 pub mod utils;
 
@@ -12,7 +13,9 @@ pub mod utils;
 pub use arrow;
 pub(crate) use deserialize::ArrowDeserializerState;
 pub use json_assembly::{
-    assemble_json_column, detect_json_groups, parse_json_column_name, preprocess_json_subcolumns,
-    JsonColumnGroup, JsonPath,
+    JsonColumnGroup, JsonPath, StructColumnInfo, assemble_json_column, detect_json_groups,
+    detect_struct_columns, parse_json_column_name, preprocess_json_subcolumns,
+    preprocess_struct_columns, struct_array_to_json,
 };
+pub use json_flatten::{FlattenedJsonPaths, create_flattened_paths, flatten_to_paths};
 pub use types::ch_to_arrow_type;

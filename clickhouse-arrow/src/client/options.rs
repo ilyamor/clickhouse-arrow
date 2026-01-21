@@ -48,38 +48,38 @@ use crate::prelude::Secret;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ClientOptions {
     /// Username credential
-    pub username:         String,
+    pub username: String,
     /// Password credential. [`Secret`] is used to minimize likelihood of exposure through logs
-    pub password:         Secret,
+    pub password: Secret,
     /// Scope this client to a specifc database, otherwise 'default' is used
     pub default_database: String,
     /// For tls, provide the domain, otherwise it will be determined from the endpoint.
-    pub domain:           Option<String>,
+    pub domain: Option<String>,
     /// Whether any non-ipv4 socket addrs should be filtered out.
-    pub ipv4_only:        bool,
+    pub ipv4_only: bool,
     /// Provide a path to a certificate authority to use for tls.
-    pub cafile:           Option<PathBuf>,
+    pub cafile: Option<PathBuf>,
     /// Whether a connection should be made securely over tls.
-    pub use_tls:          bool,
+    pub use_tls: bool,
     /// The compression to use when sending data to clickhouse.
-    pub compression:      CompressionMethod,
+    pub compression: CompressionMethod,
     /// Additional configuration not core to `ClickHouse` connections
     #[cfg_attr(feature = "serde", serde(default))]
-    pub ext:              Extension,
+    pub ext: Extension,
 }
 
 impl Default for ClientOptions {
     fn default() -> Self {
         ClientOptions {
-            username:         "default".to_string(),
-            password:         Secret::new(""),
+            username: "default".to_string(),
+            password: Secret::new(""),
             default_database: String::new(),
-            domain:           None,
-            ipv4_only:        false,
-            cafile:           None,
-            use_tls:          false,
-            compression:      CompressionMethod::default(),
-            ext:              Extension::default(),
+            domain: None,
+            ipv4_only: false,
+            cafile: None,
+            use_tls: false,
+            compression: CompressionMethod::default(),
+            ext: Extension::default(),
         }
     }
 }
@@ -87,7 +87,9 @@ impl Default for ClientOptions {
 impl ClientOptions {
     /// Create a new `ClientOptions` with default values.
     #[must_use]
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     #[must_use]
     pub fn with_username(mut self, username: impl Into<String>) -> Self {
@@ -161,18 +163,18 @@ impl ClientOptions {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Extension {
     /// Options specific to (de)serializing arrow data.
-    pub arrow:          Option<ArrowOptions>,
+    pub arrow: Option<ArrowOptions>,
     /// Options specific to communicating with `ClickHouse` over their cloud offering.
     #[cfg(feature = "cloud")]
-    pub cloud:          CloudOptions,
+    pub cloud: CloudOptions,
     /// Options related to server/client protocol send chunking.
     /// This may be removed, as it may be defaulted.
     #[cfg_attr(feature = "serde", serde(default))]
-    pub chunked_send:   ChunkedProtocolMode,
+    pub chunked_send: ChunkedProtocolMode,
     /// Options related to server/client protocol recv chunking.
     /// This may be removed, as it may be defaulted
     #[cfg_attr(feature = "serde", serde(default))]
-    pub chunked_recv:   ChunkedProtocolMode,
+    pub chunked_recv: ChunkedProtocolMode,
     /// Related to `inner_pool`, how many 'inner clients' to spawn. Currently capped at 4.
     #[cfg(feature = "inner_pool")]
     #[cfg_attr(feature = "serde", serde(default))]
@@ -282,12 +284,16 @@ impl Extension {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ArrowOptions {
-    pub strings_as_strings:           bool,
-    pub use_date32_for_date:          bool,
-    pub strict_schema:                bool,
-    pub disable_strict_schema_ddl:    bool,
+    pub strings_as_strings: bool,
+    pub use_date32_for_date: bool,
+    pub strict_schema: bool,
+    pub disable_strict_schema_ddl: bool,
     pub nullable_array_default_empty: bool,
-    pub assemble_json_subcolumns:     bool,
+    pub assemble_json_subcolumns: bool,
+    /// If `true`, serializes Arrow Struct columns as FLATTENED JSON instead of JSON text.
+    /// This sends each JSON path as a separate binary column, avoiding JSON text parsing
+    /// on the server. Requires ClickHouse JSON column type.
+    pub use_flattened_json: bool,
 }
 
 impl Default for ArrowOptions {
@@ -315,7 +321,9 @@ impl Default for ArrowOptions {
     /// let arrow_options = ArrowOptions::default();
     /// println!("Nullable array default empty: {}", arrow_options.nullable_array_default_empty); // true
     /// ```
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ArrowOptions {
@@ -337,12 +345,13 @@ impl ArrowOptions {
     /// ```
     pub const fn new() -> Self {
         Self {
-            strings_as_strings:           false,
-            use_date32_for_date:          false,
-            strict_schema:                false,
-            disable_strict_schema_ddl:    false,
+            strings_as_strings: false,
+            use_date32_for_date: false,
+            strict_schema: false,
+            disable_strict_schema_ddl: false,
             nullable_array_default_empty: true,
-            assemble_json_subcolumns:     false,
+            assemble_json_subcolumns: false,
+            use_flattened_json: false,
         }
     }
 
@@ -367,12 +376,13 @@ impl ArrowOptions {
     /// ```
     pub const fn strict() -> Self {
         Self {
-            strings_as_strings:           false,
-            use_date32_for_date:          false,
-            strict_schema:                true,
-            disable_strict_schema_ddl:    false,
+            strings_as_strings: false,
+            use_date32_for_date: false,
+            strict_schema: true,
+            disable_strict_schema_ddl: false,
             nullable_array_default_empty: false,
-            assemble_json_subcolumns:     false,
+            assemble_json_subcolumns: false,
+            use_flattened_json: false,
         }
     }
 
@@ -413,6 +423,7 @@ impl ArrowOptions {
             strings_as_strings: self.strings_as_strings,
             use_date32_for_date: self.use_date32_for_date,
             assemble_json_subcolumns: self.assemble_json_subcolumns,
+            use_flattened_json: self.use_flattened_json,
             ..Self::strict()
         }
     }
@@ -568,7 +579,7 @@ impl ArrowOptions {
     ///
     /// When enabled, Arrow columns with dot notation in their names (e.g., `labels_json.id`,
     /// `labels_json.name`) are detected and assembled into JSON strings before being sent
-    /// to ClickHouse. This is useful when working with ClickHouse JSON columns.
+    /// to `ClickHouse`. This is useful when working with `ClickHouse` JSON columns.
     ///
     /// By default, this option is disabled (`false`). When enabled, subcolumns sharing
     /// the same base name (before the first dot) are grouped and serialized as a single
@@ -595,6 +606,40 @@ impl ArrowOptions {
     #[must_use]
     pub fn with_assemble_json_subcolumns(mut self, enabled: bool) -> Self {
         self.assemble_json_subcolumns = enabled;
+        self
+    }
+
+    /// Sets whether to use FLATTENED JSON serialization for Arrow Struct columns.
+    ///
+    /// When enabled, Arrow Struct columns targeting ClickHouse JSON columns are serialized
+    /// using the FLATTENED binary format (version 3). This sends each JSON path as a
+    /// separate binary column, which the server reconstructs into a JSON object without
+    /// parsing JSON text.
+    ///
+    /// This is the most performant way to send JSON data to ClickHouse, as it avoids
+    /// JSON text parsing entirely on the server side.
+    ///
+    /// # Parameters
+    /// - `enabled`: If `true`, enables FLATTENED JSON serialization; if `false`, uses
+    ///   traditional JSON text serialization.
+    ///
+    /// # Returns
+    /// A new [`ArrowOptions`] with the updated setting.
+    ///
+    /// # Examples
+    /// ```rust,ignore
+    /// use clickhouse_arrow::prelude::*;
+    ///
+    /// // Enable FLATTENED JSON mode for maximum performance
+    /// let arrow_options = ArrowOptions::new()
+    ///     .with_use_flattened_json(true);
+    ///
+    /// // Arrow Struct columns will now be serialized as binary columnar data
+    /// // instead of JSON text strings
+    /// ```
+    #[must_use]
+    pub fn with_use_flattened_json(mut self, enabled: bool) -> Self {
+        self.use_flattened_json = enabled;
         self
     }
 
@@ -640,6 +685,7 @@ impl ArrowOptions {
             "disable_strict_schema_ddl" => self.with_disable_strict_schema_ddl(value),
             "nullable_array_default_empty" => self.with_nullable_array_default_empty(value),
             "assemble_json_subcolumns" => self.with_assemble_json_subcolumns(value),
+            "use_flattened_json" => self.with_use_flattened_json(value),
             k => {
                 warn!("Unrecognized option for ArrowOptions: {k}");
                 self
@@ -755,5 +801,5 @@ pub struct CloudOptions {
     #[cfg_attr(feature = "serde", serde(default))]
     pub timeout: Option<u64>,
     #[cfg_attr(feature = "serde", serde(default))]
-    pub wakeup:  bool,
+    pub wakeup: bool,
 }

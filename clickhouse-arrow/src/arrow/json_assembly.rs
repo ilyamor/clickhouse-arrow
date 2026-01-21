@@ -2,19 +2,20 @@
 //!
 //! This module provides functionality to detect and assemble Arrow columns with dot notation
 //! (e.g., `labels_json.id`, `labels_json.name`) into JSON strings that can be inserted into
-//! ClickHouse JSON columns.
+//! `ClickHouse` JSON columns.
 //!
-//! ClickHouse does not support flattened JSON input natively (only output), so this module
-//! performs client-side JSON assembly before sending data to ClickHouse.
+//! `ClickHouse` does not support flattened JSON input natively (only output), so this module
+//! performs client-side JSON assembly before sending data to `ClickHouse`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, AsArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
-    Int64Array, Int8Array, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    Array, ArrayRef, AsArray, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array,
+    Int32Array, Int64Array, ListArray, StringArray, StructArray, UInt8Array, UInt16Array,
+    UInt32Array, UInt64Array,
 };
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Fields, Schema};
 use arrow::record_batch::RecordBatch;
 
 use crate::{Error, Result};
@@ -54,9 +55,7 @@ pub struct JsonPath {
 /// ```
 #[must_use]
 pub fn parse_json_column_name(name: &str) -> Option<JsonPath> {
-    let mut parts = name.splitn(2, '.');
-    let base_name = parts.next()?;
-    let rest = parts.next()?;
+    let (base_name, rest) = name.split_once('.')?;
 
     Some(JsonPath {
         base_name: base_name.to_string(),
@@ -69,11 +68,11 @@ pub fn parse_json_column_name(name: &str) -> Option<JsonPath> {
 pub struct JsonColumnGroup {
     /// The base column name that will become the JSON column name.
     pub base_name: String,
-    /// List of (subpath, column_index) tuples for all subcolumns in this group.
+    /// List of (subpath, `column_index`) tuples for all subcolumns in this group.
     pub subcolumns: Vec<(Vec<String>, usize)>,
 }
 
-/// Detects and groups JSON subcolumns in a RecordBatch.
+/// Detects and groups JSON subcolumns in a [`RecordBatch`].
 ///
 /// Scans all column names for dot notation and groups them by their base name.
 /// Columns without dots are ignored.
@@ -98,9 +97,111 @@ pub fn detect_json_groups(batch: &RecordBatch) -> Vec<JsonColumnGroup> {
         .collect()
 }
 
+/// A struct column that should be converted to JSON.
+#[derive(Debug, Clone)]
+pub struct StructColumnInfo {
+    /// The column name.
+    pub name: String,
+    /// The column index in the [`RecordBatch`].
+    pub column_index: usize,
+    /// The struct fields.
+    pub fields: Fields,
+}
+
+/// Detects Struct columns in a [`RecordBatch`] that can be converted to JSON.
+///
+/// Scans all columns and returns information about those with `DataType::Struct`.
+///
+/// # Returns
+///
+/// A vector of `StructColumnInfo` structs, each representing a Struct column
+/// that can be serialized to JSON.
+#[must_use]
+pub fn detect_struct_columns(batch: &RecordBatch) -> Vec<StructColumnInfo> {
+    let mut struct_columns = Vec::new();
+
+    for (idx, field) in batch.schema().fields().iter().enumerate() {
+        if let DataType::Struct(fields) = field.data_type() {
+            struct_columns.push(StructColumnInfo {
+                name: field.name().clone(),
+                column_index: idx,
+                fields: fields.clone(),
+            });
+        }
+    }
+
+    struct_columns
+}
+
+/// Converts a [`StructArray`] to a [`StringArray`] containing JSON objects.
+///
+/// Each row in the [`StructArray`] becomes a JSON object string.
+///
+/// # Errors
+///
+/// Returns an error if any value cannot be converted to JSON.
+pub fn struct_array_to_json(array: &StructArray) -> Result<StringArray> {
+    let num_rows = array.len();
+    let mut json_strings: Vec<Option<String>> = Vec::with_capacity(num_rows);
+
+    for row_idx in 0..num_rows {
+        if array.is_null(row_idx) {
+            json_strings.push(None);
+        } else {
+            let json = struct_value_to_json_string(array, row_idx)?;
+            json_strings.push(Some(json));
+        }
+    }
+
+    Ok(StringArray::from(json_strings))
+}
+
+/// Converts a single struct value at a row index to a JSON string.
+fn struct_value_to_json_string(array: &StructArray, row_idx: usize) -> Result<String> {
+    let mut obj = String::with_capacity(64);
+    obj.push('{');
+
+    let fields = array.fields();
+    let columns = array.columns();
+
+    for (i, (field, column)) in fields.iter().zip(columns.iter()).enumerate() {
+        if i > 0 {
+            obj.push(',');
+        }
+        obj.push('"');
+        obj.push_str(field.name());
+        obj.push_str("\":");
+
+        let value = arrow_value_to_json_string(column.as_ref(), row_idx)?;
+        obj.push_str(&value);
+    }
+
+    obj.push('}');
+    Ok(obj)
+}
+
+/// Converts a single list value at a row index to a JSON array string.
+fn list_value_to_json_string(array: &ListArray, row_idx: usize) -> Result<String> {
+    let values = array.value(row_idx);
+    let mut arr_str = String::with_capacity(32);
+    arr_str.push('[');
+
+    for i in 0..values.len() {
+        if i > 0 {
+            arr_str.push(',');
+        }
+        let value = arrow_value_to_json_string(values.as_ref(), i)?;
+        arr_str.push_str(&value);
+    }
+
+    arr_str.push(']');
+    Ok(arr_str)
+}
+
 /// Converts an Arrow array value at a specific row to a JSON-compatible string representation.
 ///
 /// Handles null values and various Arrow data types, returning a JSON-formatted string.
+#[allow(clippy::too_many_lines)]
 fn arrow_value_to_json_string(array: &dyn Array, row_idx: usize) -> Result<String> {
     if array.is_null(row_idx) {
         return Ok("null".to_string());
@@ -185,14 +286,31 @@ fn arrow_value_to_json_string(array: &dyn Array, row_idx: usize) -> Result<Strin
             let arr = array.as_binary::<i32>();
             let bytes = arr.value(row_idx);
             // Try to interpret as UTF-8 first
-            match std::str::from_utf8(bytes) {
-                Ok(s) => escape_json_string(s),
-                Err(_) => {
-                    // Fall back to hex encoding for non-UTF8 binary
-                    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-                    format!("\"{hex}\"")
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                escape_json_string(s)
+            } else {
+                // Fall back to hex encoding for non-UTF8 binary
+                use std::fmt::Write;
+                let mut hex = String::with_capacity(bytes.len() * 2 + 2);
+                hex.push('"');
+                for b in bytes {
+                    let _ = write!(hex, "{b:02x}");
                 }
+                hex.push('"');
+                hex
             }
+        }
+        DataType::Struct(_) => {
+            let arr = array.as_any().downcast_ref::<StructArray>().ok_or_else(|| {
+                Error::ArrowSerialize("Failed to downcast to StructArray".to_string())
+            })?;
+            struct_value_to_json_string(arr, row_idx)?
+        }
+        DataType::List(_) | DataType::LargeList(_) => {
+            let arr = array.as_any().downcast_ref::<ListArray>().ok_or_else(|| {
+                Error::ArrowSerialize("Failed to downcast to ListArray".to_string())
+            })?;
+            list_value_to_json_string(arr, row_idx)?
         }
         dt => {
             return Err(Error::ArrowSerialize(format!(
@@ -206,6 +324,7 @@ fn arrow_value_to_json_string(array: &dyn Array, row_idx: usize) -> Result<Strin
 
 /// Escapes a string for JSON output.
 fn escape_json_string(s: &str) -> String {
+    use std::fmt::Write;
     let mut result = String::with_capacity(s.len() + 2);
     result.push('"');
     for c in s.chars() {
@@ -216,7 +335,7 @@ fn escape_json_string(s: &str) -> String {
             '\r' => result.push_str("\\r"),
             '\t' => result.push_str("\\t"),
             c if c.is_control() => {
-                result.push_str(&format!("\\u{:04x}", c as u32));
+                let _ = write!(result, "\\u{:04x}", c as u32);
             }
             c => result.push(c),
         }
@@ -259,7 +378,7 @@ fn set_nested_value(obj: &mut String, path: &[String], value: &str, is_first: &m
 
 /// Assembles JSON strings from subcolumns for a given group.
 ///
-/// Takes a RecordBatch and a group of subcolumns, and produces a StringArray
+/// Takes a [`RecordBatch`] and a group of subcolumns, and produces a [`StringArray`]
 /// containing JSON objects assembled from the subcolumn values.
 ///
 /// # Errors
@@ -287,19 +406,19 @@ pub fn assemble_json_column(batch: &RecordBatch, group: &JsonColumnGroup) -> Res
     Ok(StringArray::from(json_strings))
 }
 
-/// Preprocesses a RecordBatch to assemble JSON subcolumns.
+/// Preprocesses a [`RecordBatch`] to assemble JSON subcolumns.
 ///
 /// This function detects columns with dot notation in their names, groups them
-/// by base name, assembles them into JSON strings, and returns a new RecordBatch
+/// by base name, assembles them into JSON strings, and returns a new [`RecordBatch`]
 /// with the assembled JSON columns replacing the original subcolumns.
 ///
 /// # Arguments
 ///
-/// * `batch` - The input RecordBatch containing potentially flattened JSON columns.
+/// * `batch` - The input [`RecordBatch`] containing potentially flattened JSON columns.
 ///
 /// # Returns
 ///
-/// A new RecordBatch where subcolumns have been assembled into JSON columns.
+/// A new [`RecordBatch`] where subcolumns have been assembled into JSON columns.
 /// Returns the original batch unchanged if no JSON subcolumns are detected.
 ///
 /// # Errors
@@ -334,9 +453,66 @@ pub fn preprocess_json_subcolumns(batch: RecordBatch) -> Result<RecordBatch> {
 
     // Then, add the assembled JSON columns
     for group in &groups {
-        let json_array = assemble_json_column(&batch, &group)?;
+        let json_array = assemble_json_column(&batch, group)?;
         new_fields.push(Field::new(&group.base_name, DataType::Utf8, false));
         new_columns.push(Arc::new(json_array) as ArrayRef);
+    }
+
+    let new_schema = Arc::new(Schema::new(new_fields));
+    RecordBatch::try_new(new_schema, new_columns)
+        .map_err(|e| Error::ArrowSerialize(format!("Failed to create RecordBatch: {e}")))
+}
+
+/// Preprocesses a [`RecordBatch`] to convert Struct columns to JSON strings.
+///
+/// This function detects columns with `DataType::Struct`, converts them to JSON
+/// strings, and returns a new [`RecordBatch`] with the converted columns.
+///
+/// # Arguments
+///
+/// * `batch` - The input [`RecordBatch`] containing Struct columns.
+///
+/// # Returns
+///
+/// A new [`RecordBatch`] where Struct columns have been converted to JSON string columns.
+/// Returns the original batch unchanged if no Struct columns are detected.
+///
+/// # Errors
+///
+/// Returns an error if JSON conversion fails for any column.
+pub fn preprocess_struct_columns(batch: RecordBatch) -> Result<RecordBatch> {
+    let struct_cols = detect_struct_columns(&batch);
+
+    if struct_cols.is_empty() {
+        return Ok(batch);
+    }
+
+    // Build a map from column index to struct column info for O(1) lookup
+    let struct_col_map: HashMap<usize, &StructColumnInfo> =
+        struct_cols.iter().map(|c| (c.column_index, c)).collect();
+
+    // Build new schema and columns
+    let mut new_fields: Vec<Field> = Vec::new();
+    let mut new_columns: Vec<ArrayRef> = Vec::new();
+
+    for (idx, field) in batch.schema().fields().iter().enumerate() {
+        if let Some(struct_col) = struct_col_map.get(&idx) {
+            // Convert struct column to JSON
+            let column = batch.column(idx);
+            let struct_array = column.as_any().downcast_ref::<StructArray>().ok_or_else(|| {
+                Error::ArrowSerialize(format!(
+                    "Failed to downcast column {} to StructArray",
+                    struct_col.name
+                ))
+            })?;
+            let json_array = struct_array_to_json(struct_array)?;
+            new_fields.push(Field::new(&struct_col.name, DataType::Utf8, field.is_nullable()));
+            new_columns.push(Arc::new(json_array) as ArrayRef);
+        } else {
+            // Keep non-struct columns as-is
+            new_fields.push(field.as_ref().clone());
+            new_columns.push(Arc::clone(batch.column(idx)));
+        }
     }
 
     let new_schema = Arc::new(Schema::new(new_fields));
@@ -530,5 +706,135 @@ mod tests {
         // Should return the same batch unchanged
         assert_eq!(result.num_columns(), 2);
         assert_eq!(result.schema(), batch.schema());
+    }
+
+    #[test]
+    fn test_detect_struct_columns() {
+        let struct_fields = Fields::from(vec![
+            Field::new("name", DataType::Utf8, false),
+            Field::new("age", DataType::Int64, false),
+        ]);
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("metadata", DataType::Struct(struct_fields.clone()), true),
+        ]);
+
+        let name_array = StringArray::from(vec!["Alice", "Bob"]);
+        let age_array = Int64Array::from(vec![30, 25]);
+        let struct_array = StructArray::from(vec![
+            (Arc::new(Field::new("name", DataType::Utf8, false)), Arc::new(name_array) as ArrayRef),
+            (Arc::new(Field::new("age", DataType::Int64, false)), Arc::new(age_array) as ArrayRef),
+        ]);
+
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef,
+                Arc::new(struct_array) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let struct_cols = detect_struct_columns(&batch);
+        assert_eq!(struct_cols.len(), 1);
+        assert_eq!(struct_cols[0].name, "metadata");
+        assert_eq!(struct_cols[0].column_index, 1);
+    }
+
+    #[test]
+    fn test_struct_array_to_json() {
+        let name_array = StringArray::from(vec!["Alice", "Bob"]);
+        let age_array = Int64Array::from(vec![30, 25]);
+        let struct_array = StructArray::from(vec![
+            (Arc::new(Field::new("name", DataType::Utf8, false)), Arc::new(name_array) as ArrayRef),
+            (Arc::new(Field::new("age", DataType::Int64, false)), Arc::new(age_array) as ArrayRef),
+        ]);
+
+        let json_array = struct_array_to_json(&struct_array).unwrap();
+        assert_eq!(json_array.len(), 2);
+
+        let row0 = json_array.value(0);
+        assert!(row0.contains("\"name\":\"Alice\""));
+        assert!(row0.contains("\"age\":30"));
+
+        let row1 = json_array.value(1);
+        assert!(row1.contains("\"name\":\"Bob\""));
+        assert!(row1.contains("\"age\":25"));
+    }
+
+    #[test]
+    fn test_preprocess_struct_columns() {
+        let struct_fields = Fields::from(vec![
+            Field::new("name", DataType::Utf8, false),
+            Field::new("count", DataType::Int64, false),
+        ]);
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("data", DataType::Struct(struct_fields), true),
+        ]);
+
+        let name_array = StringArray::from(vec!["test", "prod"]);
+        let count_array = Int64Array::from(vec![10, 20]);
+        let struct_array = StructArray::from(vec![
+            (Arc::new(Field::new("name", DataType::Utf8, false)), Arc::new(name_array) as ArrayRef),
+            (
+                Arc::new(Field::new("count", DataType::Int64, false)),
+                Arc::new(count_array) as ArrayRef,
+            ),
+        ]);
+
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef,
+                Arc::new(struct_array) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let result = preprocess_struct_columns(batch).unwrap();
+
+        // Should have 2 columns: id and data (now as string)
+        assert_eq!(result.num_columns(), 2);
+
+        let schema = result.schema();
+        assert_eq!(schema.field(0).name(), "id");
+        assert_eq!(schema.field(1).name(), "data");
+        assert_eq!(schema.field(1).data_type(), &DataType::Utf8);
+
+        // Check the JSON content
+        let json_col = result.column(1).as_string::<i32>();
+        let row0 = json_col.value(0);
+        assert!(row0.contains("\"name\":\"test\""));
+        assert!(row0.contains("\"count\":10"));
+    }
+
+    #[test]
+    fn test_nested_struct_to_json() {
+        // Test nested struct: {outer: {inner: {value: 42}}}
+        let inner_fields = Fields::from(vec![Field::new("value", DataType::Int64, false)]);
+        let _outer_fields =
+            Fields::from(vec![Field::new("inner", DataType::Struct(inner_fields), false)]);
+
+        let value_array = Int64Array::from(vec![42]);
+        let inner_struct = StructArray::from(vec![(
+            Arc::new(Field::new("value", DataType::Int64, false)),
+            Arc::new(value_array) as ArrayRef,
+        )]);
+        let outer_struct = StructArray::from(vec![(
+            Arc::new(Field::new(
+                "inner",
+                DataType::Struct(Fields::from(vec![Field::new("value", DataType::Int64, false)])),
+                false,
+            )),
+            Arc::new(inner_struct) as ArrayRef,
+        )]);
+
+        let json_array = struct_array_to_json(&outer_struct).unwrap();
+        assert_eq!(json_array.len(), 1);
+
+        let row0 = json_array.value(0);
+        // Should contain nested JSON structure
+        assert!(row0.contains("\"inner\":{\"value\":42}"));
     }
 }
