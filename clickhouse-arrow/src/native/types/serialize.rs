@@ -120,7 +120,12 @@ impl ClickHouseNativeSerializer for Type {
                 return;
             }
             Type::Object => {
-                writer.put_i8(1);
+                // Check if FLATTENED JSON mode is enabled - if so, skip writing the STRING version
+                // because the FLATTENED serialization will write its own version 3 header
+                let use_flattened = state.options.map(|o| o.use_flattened_json).unwrap_or(false);
+                if !use_flattened {
+                    writer.put_i8(1);
+                }
                 return;
             }
             _ => return,

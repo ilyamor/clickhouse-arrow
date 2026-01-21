@@ -10,8 +10,15 @@ impl Serializer for ObjectSerializer {
     async fn write_prefix<W: ClickHouseWrite>(
         _type_: &Type,
         writer: &mut W,
-        _state: &mut SerializerState,
+        state: &mut SerializerState,
     ) -> Result<()> {
+        // Check if FLATTENED JSON mode is enabled - if so, skip writing the STRING version
+        // because the FLATTENED serialization will write its own version 3 header
+        let use_flattened = state.options.map(|o| o.use_flattened_json).unwrap_or(false);
+        if use_flattened {
+            return Ok(());
+        }
+
         // Corresponds to STRING serialization in native protocol
         // See: https://github.com/ClickHouse/ClickHouse/blob/6fb23dee26fdee776c014e735436a4e670c99d82/src/DataTypes/Serializations/SerializationObject.cpp#L216
         writer.write_u8(1).await?;
