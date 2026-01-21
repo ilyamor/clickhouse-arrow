@@ -287,6 +287,7 @@ pub struct ArrowOptions {
     pub strict_schema:                bool,
     pub disable_strict_schema_ddl:    bool,
     pub nullable_array_default_empty: bool,
+    pub assemble_json_subcolumns:     bool,
 }
 
 impl Default for ArrowOptions {
@@ -341,6 +342,7 @@ impl ArrowOptions {
             strict_schema:                false,
             disable_strict_schema_ddl:    false,
             nullable_array_default_empty: true,
+            assemble_json_subcolumns:     false,
         }
     }
 
@@ -370,6 +372,7 @@ impl ArrowOptions {
             strict_schema:                true,
             disable_strict_schema_ddl:    false,
             nullable_array_default_empty: false,
+            assemble_json_subcolumns:     false,
         }
     }
 
@@ -409,6 +412,7 @@ impl ArrowOptions {
         Self {
             strings_as_strings: self.strings_as_strings,
             use_date32_for_date: self.use_date32_for_date,
+            assemble_json_subcolumns: self.assemble_json_subcolumns,
             ..Self::strict()
         }
     }
@@ -560,6 +564,40 @@ impl ArrowOptions {
         self
     }
 
+    /// Sets whether to automatically assemble JSON subcolumns during serialization.
+    ///
+    /// When enabled, Arrow columns with dot notation in their names (e.g., `labels_json.id`,
+    /// `labels_json.name`) are detected and assembled into JSON strings before being sent
+    /// to ClickHouse. This is useful when working with ClickHouse JSON columns.
+    ///
+    /// By default, this option is disabled (`false`). When enabled, subcolumns sharing
+    /// the same base name (before the first dot) are grouped and serialized as a single
+    /// JSON column.
+    ///
+    /// # Parameters
+    /// - `enabled`: If `true`, enables automatic JSON subcolumn assembly; if `false`, columns
+    ///   are sent as-is.
+    ///
+    /// # Returns
+    /// A new [`ArrowOptions`] with the updated setting.
+    ///
+    /// # Examples
+    /// ```rust,ignore
+    /// use clickhouse_arrow::prelude::*;
+    ///
+    /// // Enable JSON subcolumn assembly
+    /// let arrow_options = ArrowOptions::new()
+    ///     .with_assemble_json_subcolumns(true);
+    ///
+    /// // Arrow columns like "labels.id", "labels.name" will be assembled
+    /// // into a single "labels" column with JSON content: {"id": ..., "name": ...}
+    /// ```
+    #[must_use]
+    pub fn with_assemble_json_subcolumns(mut self, enabled: bool) -> Self {
+        self.assemble_json_subcolumns = enabled;
+        self
+    }
+
     /// Sets an Arrow option by name and value.
     ///
     /// This method updates a specific option identified by `name` to the given boolean
@@ -570,6 +608,7 @@ impl ArrowOptions {
     /// - `"disable_strict_schema_ddl"`: Disables strict mode for schema creation.
     /// - `"nullable_array_default_empty"`: Maps `Nullable(Array(...))` to `Array(...)` with `[]`
     ///   for nulls.
+    /// - `"assemble_json_subcolumns"`: Enables automatic assembly of dot-notation columns into JSON.
     ///
     /// If an unrecognized name is provided, a warning is logged, and the options are
     /// returned unchanged. Use this for dynamic configuration or when options are
@@ -600,6 +639,7 @@ impl ArrowOptions {
             "strict_schema" => self.with_strict_schema(value),
             "disable_strict_schema_ddl" => self.with_disable_strict_schema_ddl(value),
             "nullable_array_default_empty" => self.with_nullable_array_default_empty(value),
+            "assemble_json_subcolumns" => self.with_assemble_json_subcolumns(value),
             k => {
                 warn!("Unrecognized option for ArrowOptions: {k}");
                 self

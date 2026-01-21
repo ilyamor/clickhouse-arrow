@@ -8,6 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::builder::TypedBuilder;
 use super::deserialize::{ArrowDeserializerState, ClickHouseArrowDeserializer};
+use super::json_assembly::preprocess_json_subcolumns;
 use super::serialize::ClickHouseArrowSerializer;
 use super::types::arrow_to_ch_type;
 pub use super::types::{
@@ -65,14 +66,21 @@ impl ProtocolData<RecordBatch, ArrowDeserializerState> for RecordBatch {
         header: Option<&[(String, Type)]>,
         options: ArrowOptions,
     ) -> Result<()> {
-        let schema = self.schema();
+        // Preprocess JSON subcolumns if enabled
+        let batch = if options.assemble_json_subcolumns {
+            preprocess_json_subcolumns(self)?
+        } else {
+            self
+        };
+
+        let schema = batch.schema();
 
         if revision > 0 {
             BlockInfo::default().write_async(writer).await?;
         }
 
         // Write number of columns and rows
-        let (columns, rows) = (schema.fields().len(), self.num_rows());
+        let (columns, rows) = (schema.fields().len(), batch.num_rows());
         writer.write_var_uint(columns as u64).await?;
         writer.write_var_uint(rows as u64).await?;
 
@@ -84,7 +92,7 @@ impl ProtocolData<RecordBatch, ArrowDeserializerState> for RecordBatch {
 
         // Convert and write each column
         for (i, field) in schema.fields().iter().enumerate() {
-            let column = self.column(i);
+            let column = batch.column(i);
             let name = field.name();
             let data_type = field.data_type();
             let nullable = field.is_nullable();
@@ -133,14 +141,21 @@ impl ProtocolData<RecordBatch, ArrowDeserializerState> for RecordBatch {
         header: Option<&[(String, Type)]>,
         options: ArrowOptions,
     ) -> Result<()> {
-        let schema = self.schema();
+        // Preprocess JSON subcolumns if enabled
+        let batch = if options.assemble_json_subcolumns {
+            preprocess_json_subcolumns(self)?
+        } else {
+            self
+        };
+
+        let schema = batch.schema();
 
         if revision > 0 {
             BlockInfo::default().write(writer)?;
         }
 
         // Write number of columns and rows
-        let (columns, rows) = (schema.fields().len(), self.num_rows());
+        let (columns, rows) = (schema.fields().len(), batch.num_rows());
         writer.put_var_uint(columns as u64)?;
         writer.put_var_uint(rows as u64)?;
 
@@ -152,7 +167,7 @@ impl ProtocolData<RecordBatch, ArrowDeserializerState> for RecordBatch {
 
         // Convert and write each column
         for (i, field) in schema.fields().iter().enumerate() {
-            let column = self.column(i);
+            let column = batch.column(i);
             let name = field.name();
             let data_type = field.data_type();
             let nullable = field.is_nullable();
