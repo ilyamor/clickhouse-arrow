@@ -32,7 +32,7 @@ pub(super) async fn serialize_async<W: ClickHouseWrite>(
     values: &ArrayRef,
 ) -> Result<()> {
     match type_hint.strip_null() {
-        Type::String | Type::Object => write_string_values(values, writer).await?,
+        Type::String | Type::Object(_) => write_string_values(values, writer).await?,
         Type::Binary => write_binary_values(values, writer).await?,
         Type::FixedSizedString(len) => write_fixed_string_values(values, writer, *len).await?,
         Type::FixedSizedBinary(len) => write_fixed_binary_values(values, writer, *len).await?,
@@ -50,7 +50,7 @@ pub(super) fn serialize<W: ClickHouseBytesWrite>(
     values: &ArrayRef,
 ) -> Result<()> {
     match type_hint.strip_null() {
-        Type::String | Type::Object => put_string_values(values, writer)?,
+        Type::String | Type::Object(_) => put_string_values(values, writer)?,
         Type::Binary => put_binary_values(values, writer)?,
         Type::FixedSizedString(len) => put_fixed_string_values(values, writer, *len)?,
         Type::FixedSizedBinary(len) => put_fixed_binary_values(values, writer, *len)?,
@@ -323,10 +323,14 @@ put_fixed_values!(put_fixed_binary_values, [
 ]);
 
 /// Coerces a byte slice to itself (no-op).
-fn pass_through(v: &[u8]) -> &[u8] { v }
+fn pass_through(v: &[u8]) -> &[u8] {
+    v
+}
 
 /// Coerces a string to its byte representation.
-fn as_bytes(v: &str) -> &[u8] { v.as_bytes() }
+fn as_bytes(v: &str) -> &[u8] {
+    v.as_bytes()
+}
 
 #[cfg(test)]
 mod tests {

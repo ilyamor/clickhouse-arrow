@@ -293,11 +293,17 @@ pub(crate) fn arrow_to_ch_type(
             Type::LowCardinality(Box::new(arrow_to_ch_type(value_type, nullable, options)?))
         }
         DataType::Struct(fields) => {
-            let ch_types = fields
-                .iter()
-                .map(|f| arrow_to_ch_type(f.data_type(), f.is_nullable(), options))
-                .collect::<Result<_>>()?;
-            Type::Tuple(ch_types)
+            // When use_flattened_json is enabled, convert Struct to Object (JSON)
+            // so that FLATTENED serialization is used
+            if options.is_some_and(|o| o.use_flattened_json) {
+                Type::Object(vec![])
+            } else {
+                let ch_types = fields
+                    .iter()
+                    .map(|f| arrow_to_ch_type(f.data_type(), f.is_nullable(), options))
+                    .collect::<Result<_>>()?;
+                Type::Tuple(ch_types)
+            }
         }
         DataType::Map(key, _) => {
             let DataType::Struct(inner) = key.data_type() else {
@@ -397,7 +403,7 @@ pub fn ch_to_arrow_type(ch_type: &Type, options: Option<ArrowOptions>) -> Result
             DataType::FixedSizeBinary(*len as i32)
         }
         Type::Binary => DataType::Binary,
-        Type::Object => DataType::Utf8,
+        Type::Object(_) => DataType::Utf8,
         Type::Date32 | Type::Date => DataType::Date32,
         Type::DateTime(tz) => DataType::Timestamp(TimeUnit::Second, Some(Arc::from(tz.name()))),
         Type::DateTime64(p, tz) => match p {
@@ -1168,5 +1174,24 @@ mod tests {
         let result = schema_conversion(date_field, None, conversion_opts_date32);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Type::Date32);
+    }
+
+    /// Tests that `arrow_to_ch_type` converts Struct to Object when `use_flattened_json` is enabled.
+    #[test]
+    fn test_struct_to_object_with_flattened_json() {
+        let struct_type = DataType::Struct(Fields::from(vec![
+            Field::new("user_id", DataType::Int64, false),
+            Field::new("action", DataType::Utf8, false),
+        ]));
+
+        // Without use_flattened_json: Struct -> Tuple
+        let options_no_flatten = Some(ArrowOptions::default());
+        let ch_type = arrow_to_ch_type(&struct_type, false, options_no_flatten).unwrap();
+        assert!(matches!(ch_type, Type::Tuple(_)));
+
+        // With use_flattened_json: Struct -> Object
+        let options_flatten = Some(ArrowOptions::default().with_use_flattened_json(true));
+        let ch_type = arrow_to_ch_type(&struct_type, false, options_flatten).unwrap();
+        assert_eq!(ch_type, Type::Object(vec![]));
     }
 }

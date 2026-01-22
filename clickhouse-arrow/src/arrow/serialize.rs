@@ -1,9 +1,11 @@
 mod binary;
+pub(crate) mod dynamic;
 mod enums;
 mod list;
 mod low_cardinality;
 mod map;
 mod null;
+pub(crate) mod object_flattened;
 mod primitive;
 mod tuple;
 
@@ -106,6 +108,34 @@ impl ClickHouseArrowSerializer for Type {
         // intended to encode all of the ClickHouse information. BUT, list serialize, for example,
         // requires it.
         let base_type = self.strip_null();
+        let use_flattened = state.options.map(|o| o.use_flattened_json).unwrap_or(false);
+
+        // Special handling for Nullable(Object) with FLATTENED mode:
+        // ClickHouse expects: ObjectStructure -> null bitmap -> ObjectData
+        // We must write ObjectStructure BEFORE the null bitmap
+        if self.is_nullable() && use_flattened {
+            if let Type::Object(typed_paths) = base_type {
+                if let DataType::Struct(_) = data_type {
+                    if let Some(struct_array) = column.as_any().downcast_ref::<StructArray>() {
+                        let (typed, dynamic) =
+                            object_flattened::categorize_paths(struct_array, typed_paths)?;
+                        // Write ObjectStructure (version + paths) FIRST
+                        object_flattened::serialize_object_structure_with_typed_paths_async(
+                            writer, &typed, &dynamic,
+                        )
+                        .await?;
+                        // Then write null bitmap
+                        null::serialize_nulls_async(self, writer, column, state).await?;
+                        // Then write ObjectData
+                        Box::pin(object_flattened::serialize_object_data_with_typed_paths_async(
+                            writer, &typed, &dynamic, state,
+                        ))
+                        .await?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
 
         if self.is_nullable() {
             null::serialize_nulls_async(self, writer, column, state).await?;
@@ -144,9 +174,33 @@ impl ClickHouseArrowSerializer for Type {
             Type::String
             | Type::Binary
             | Type::FixedSizedString(_)
-            | Type::FixedSizedBinary(_)
-            | Type::Object => {
+            | Type::FixedSizedBinary(_) => {
                 binary::serialize_async(self, writer, column).await?;
+            }
+            // JSON Object - potentially FLATTENED mode
+            Type::Object(typed_paths) => {
+                if use_flattened {
+                    if let DataType::Struct(_) = data_type {
+                        if let Some(struct_array) = column.as_any().downcast_ref::<StructArray>() {
+                            Box::pin(object_flattened::serialize_struct_as_flattened_json_with_typed_paths_async(
+                                writer,
+                                struct_array,
+                                typed_paths,
+                                state,
+                            ))
+                            .await?;
+                        } else {
+                            // Fallback to binary if can't downcast
+                            binary::serialize_async(self, writer, column).await?;
+                        }
+                    } else {
+                        // Non-struct types use binary serialization (JSON as string)
+                        binary::serialize_async(self, writer, column).await?;
+                    }
+                } else {
+                    // Standard JSON-as-string serialization
+                    binary::serialize_async(self, writer, column).await?;
+                }
             }
             // Dictionary-Like
             Type::Enum8(_) | Type::Enum16(_) => {
@@ -192,6 +246,32 @@ impl ClickHouseArrowSerializer for Type {
         // intended to encode all of the ClickHouse information. BUT, list serialize, for example,
         // requires it.
         let base_type = self.strip_null();
+        let use_flattened = state.options.map(|o| o.use_flattened_json).unwrap_or(false);
+
+        // Special handling for Nullable(Object) with FLATTENED mode:
+        // ClickHouse expects: ObjectStructure -> null bitmap -> ObjectData
+        // We must write ObjectStructure BEFORE the null bitmap
+        if self.is_nullable() && use_flattened {
+            if let Type::Object(typed_paths) = base_type {
+                if let DataType::Struct(_) = data_type {
+                    if let Some(struct_array) = column.as_any().downcast_ref::<StructArray>() {
+                        let (typed, dynamic) =
+                            object_flattened::categorize_paths(struct_array, typed_paths)?;
+                        // Write ObjectStructure (version + paths) FIRST
+                        object_flattened::serialize_object_structure_with_typed_paths(
+                            writer, &typed, &dynamic,
+                        )?;
+                        // Then write null bitmap
+                        null::serialize_nulls(self, writer, column, state);
+                        // Then write ObjectData
+                        object_flattened::serialize_object_data_with_typed_paths(
+                            writer, &typed, &dynamic, state,
+                        )?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
 
         if self.is_nullable() {
             null::serialize_nulls(self, writer, column, state);
@@ -230,9 +310,32 @@ impl ClickHouseArrowSerializer for Type {
             Type::String
             | Type::Binary
             | Type::FixedSizedString(_)
-            | Type::FixedSizedBinary(_)
-            | Type::Object => {
+            | Type::FixedSizedBinary(_) => {
                 binary::serialize(self, writer, column)?;
+            }
+            // JSON Object - potentially FLATTENED mode
+            Type::Object(typed_paths) => {
+                if use_flattened {
+                    if let DataType::Struct(_) = data_type {
+                        if let Some(struct_array) = column.as_any().downcast_ref::<StructArray>() {
+                            object_flattened::serialize_struct_as_flattened_json_with_typed_paths(
+                                writer,
+                                struct_array,
+                                typed_paths,
+                                state,
+                            )?;
+                        } else {
+                            // Fallback to binary if can't downcast
+                            binary::serialize(self, writer, column)?;
+                        }
+                    } else {
+                        // Non-struct types use binary serialization (JSON as string)
+                        binary::serialize(self, writer, column)?;
+                    }
+                } else {
+                    // Standard JSON-as-string serialization
+                    binary::serialize(self, writer, column)?;
+                }
             }
             // Dictionary-Like
             Type::Enum8(_) | Type::Enum16(_) => enums::serialize(self, writer, column)?,
@@ -295,11 +398,14 @@ mod tests {
             .unwrap();
 
         let output = buffer.into_inner();
-        assert_eq!(output, vec![
-            1, 0, 0, 0, // 1
-            2, 0, 0, 0, // 2
-            3, 0, 0, 0, // 3
-        ]);
+        assert_eq!(
+            output,
+            vec![
+                1, 0, 0, 0, // 1
+                2, 0, 0, 0, // 2
+                3, 0, 0, 0, // 3
+            ]
+        );
     }
 
     /// Tests serialization of `Nullable(Int32)` array with nulls.
@@ -315,13 +421,16 @@ mod tests {
             .unwrap();
 
         let output = buffer.into_inner();
-        assert_eq!(output, vec![
-            // Null mask: [0, 1, 0] (0=non-null, 1=null)
-            0, 1, 0, // Values: [1, 0, 3]
-            1, 0, 0, 0, // 1
-            0, 0, 0, 0, // null
-            3, 0, 0, 0, // 3
-        ]);
+        assert_eq!(
+            output,
+            vec![
+                // Null mask: [0, 1, 0] (0=non-null, 1=null)
+                0, 1, 0, // Values: [1, 0, 3]
+                1, 0, 0, 0, // 1
+                0, 0, 0, 0, // null
+                3, 0, 0, 0, // 3
+            ]
+        );
     }
 
     /// Tests serialization of `String` array.
@@ -337,11 +446,14 @@ mod tests {
             .unwrap();
 
         let output = buffer.into_inner();
-        assert_eq!(output, vec![
-            5, b'h', b'e', b'l', b'l', b'o', // "hello"
-            0,    // ""
-            5, b'w', b'o', b'r', b'l', b'd', // "world"
-        ]);
+        assert_eq!(
+            output,
+            vec![
+                5, b'h', b'e', b'l', b'l', b'o', // "hello"
+                0,    // ""
+                5, b'w', b'o', b'r', b'l', b'd', // "world"
+            ]
+        );
     }
 
     /// Tests serialization of `Nullable(String)` array with nulls.
@@ -357,13 +469,16 @@ mod tests {
             .unwrap();
 
         let output = buffer.into_inner();
-        assert_eq!(output, vec![
-            // Null mask: [0, 1, 0]
-            0, 1, 0, // Values: ["a", "", "c"]
-            1, b'a', // "a"
-            0,    // null (empty string)
-            1, b'c', // "c"
-        ]);
+        assert_eq!(
+            output,
+            vec![
+                // Null mask: [0, 1, 0]
+                0, 1, 0, // Values: ["a", "", "c"]
+                1, b'a', // "a"
+                0,    // null (empty string)
+                1, b'c', // "c"
+            ]
+        );
     }
 
     /// Tests serialization of `Array(Int32)` with non-nullable inner values.
@@ -383,18 +498,21 @@ mod tests {
             .unwrap();
 
         let output = buffer.into_inner();
-        assert_eq!(output, vec![
-            // Offsets: [2, 3, 5] (skipping first 0)
-            2, 0, 0, 0, 0, 0, 0, 0, // 2
-            3, 0, 0, 0, 0, 0, 0, 0, // 3
-            5, 0, 0, 0, 0, 0, 0, 0, // 5
-            // Values: [1, 2, 3, 4, 5]
-            1, 0, 0, 0, // 1
-            2, 0, 0, 0, // 2
-            3, 0, 0, 0, // 3
-            4, 0, 0, 0, // 4
-            5, 0, 0, 0, // 5
-        ]);
+        assert_eq!(
+            output,
+            vec![
+                // Offsets: [2, 3, 5] (skipping first 0)
+                2, 0, 0, 0, 0, 0, 0, 0, // 2
+                3, 0, 0, 0, 0, 0, 0, 0, // 3
+                5, 0, 0, 0, 0, 0, 0, 0, // 5
+                // Values: [1, 2, 3, 4, 5]
+                1, 0, 0, 0, // 1
+                2, 0, 0, 0, // 2
+                3, 0, 0, 0, // 3
+                4, 0, 0, 0, // 4
+                5, 0, 0, 0, // 5
+            ]
+        );
     }
 
     /// Tests serialization of `Nullable(Array(Int32))` with null arrays.
@@ -416,18 +534,21 @@ mod tests {
             .unwrap();
 
         let output = buffer.into_inner();
-        assert_eq!(output, vec![
-            // Null mask: [] (0=non-null, 1=null)
-            2, 0, 0, 0, 0, 0, 0, 0, // 2
-            2, 0, 0, 0, 0, 0, 0, 0, // 2 (null)
-            5, 0, 0, 0, 0, 0, 0, 0, // 5
-            // Values: [1, 2, 3, 4, 5]
-            1, 0, 0, 0, // 1
-            2, 0, 0, 0, // 2
-            3, 0, 0, 0, // 3
-            4, 0, 0, 0, // 4
-            5, 0, 0, 0, // 5
-        ]);
+        assert_eq!(
+            output,
+            vec![
+                // Null mask: [] (0=non-null, 1=null)
+                2, 0, 0, 0, 0, 0, 0, 0, // 2
+                2, 0, 0, 0, 0, 0, 0, 0, // 2 (null)
+                5, 0, 0, 0, 0, 0, 0, 0, // 5
+                // Values: [1, 2, 3, 4, 5]
+                1, 0, 0, 0, // 1
+                2, 0, 0, 0, // 2
+                3, 0, 0, 0, // 3
+                4, 0, 0, 0, // 4
+                5, 0, 0, 0, // 5
+            ]
+        );
     }
 
     /// Tests serialization of `Map(String, Int32)` with non-nullable key-value pairs.
@@ -459,24 +580,27 @@ mod tests {
             .unwrap();
 
         let output = buffer.into_inner();
-        assert_eq!(output, vec![
-            // Offsets: [2, 3, 5] (skipping first 0)
-            2, 0, 0, 0, 0, 0, 0, 0, // 2
-            3, 0, 0, 0, 0, 0, 0, 0, // 3
-            5, 0, 0, 0, 0, 0, 0, 0, // 5
-            // Keys: ["a", "b", "c", "d", "e"]
-            1, b'a', // "a"
-            1, b'b', // "b"
-            1, b'c', // "c"
-            1, b'd', // "d"
-            1, b'e', // "e"
-            // Values: [1, 2, 3, 4, 5]
-            1, 0, 0, 0, // 1
-            2, 0, 0, 0, // 2
-            3, 0, 0, 0, // 3
-            4, 0, 0, 0, // 4
-            5, 0, 0, 0, // 5
-        ]);
+        assert_eq!(
+            output,
+            vec![
+                // Offsets: [2, 3, 5] (skipping first 0)
+                2, 0, 0, 0, 0, 0, 0, 0, // 2
+                3, 0, 0, 0, 0, 0, 0, 0, // 3
+                5, 0, 0, 0, 0, 0, 0, 0, // 5
+                // Keys: ["a", "b", "c", "d", "e"]
+                1, b'a', // "a"
+                1, b'b', // "b"
+                1, b'c', // "c"
+                1, b'd', // "d"
+                1, b'e', // "e"
+                // Values: [1, 2, 3, 4, 5]
+                1, 0, 0, 0, // 1
+                2, 0, 0, 0, // 2
+                3, 0, 0, 0, // 3
+                4, 0, 0, 0, // 4
+                5, 0, 0, 0, // 5
+            ]
+        );
     }
 
     /// Tests serialization of `Int32` array with zero rows.
@@ -793,11 +917,14 @@ mod tests_sync {
 
         Type::Int32.serialize(&mut buffer, &column, &DataType::Int32, &mut state).unwrap();
 
-        assert_eq!(buffer, vec![
-            1, 0, 0, 0, // 1
-            2, 0, 0, 0, // 2
-            3, 0, 0, 0, // 3
-        ]);
+        assert_eq!(
+            buffer,
+            vec![
+                1, 0, 0, 0, // 1
+                2, 0, 0, 0, // 2
+                3, 0, 0, 0, // 3
+            ]
+        );
     }
 
     /// Tests serialization of `Nullable(Int32)` array with nulls.
@@ -811,13 +938,16 @@ mod tests_sync {
             .serialize(&mut buffer, &column, &DataType::Int32, &mut state)
             .unwrap();
 
-        assert_eq!(buffer, vec![
-            // Null mask: [0, 1, 0] (0=non-null, 1=null)
-            0, 1, 0, // Values: [1, 0, 3]
-            1, 0, 0, 0, // 1
-            0, 0, 0, 0, // null
-            3, 0, 0, 0, // 3
-        ]);
+        assert_eq!(
+            buffer,
+            vec![
+                // Null mask: [0, 1, 0] (0=non-null, 1=null)
+                0, 1, 0, // Values: [1, 0, 3]
+                1, 0, 0, 0, // 1
+                0, 0, 0, 0, // null
+                3, 0, 0, 0, // 3
+            ]
+        );
     }
 
     /// Tests serialization of `String` array.
@@ -829,11 +959,14 @@ mod tests_sync {
 
         Type::String.serialize(&mut buffer, &column, &DataType::Utf8, &mut state).unwrap();
 
-        assert_eq!(buffer, vec![
-            5, b'h', b'e', b'l', b'l', b'o', // "hello"
-            0,    // ""
-            5, b'w', b'o', b'r', b'l', b'd', // "world"
-        ]);
+        assert_eq!(
+            buffer,
+            vec![
+                5, b'h', b'e', b'l', b'l', b'o', // "hello"
+                0,    // ""
+                5, b'w', b'o', b'r', b'l', b'd', // "world"
+            ]
+        );
     }
 
     /// Tests serialization of `Nullable(String)` array with nulls.
@@ -847,13 +980,16 @@ mod tests_sync {
             .serialize(&mut buffer, &column, &DataType::Utf8, &mut state)
             .unwrap();
 
-        assert_eq!(buffer, vec![
-            // Null mask: [0, 1, 0]
-            0, 1, 0, // Values: ["a", "", "c"]
-            1, b'a', // "a"
-            0,    // null (empty string)
-            1, b'c', // "c"
-        ]);
+        assert_eq!(
+            buffer,
+            vec![
+                // Null mask: [0, 1, 0]
+                0, 1, 0, // Values: ["a", "", "c"]
+                1, b'a', // "a"
+                0,    // null (empty string)
+                1, b'c', // "c"
+            ]
+        );
     }
 
     /// Tests serialization of `Array(Int32)` with non-nullable inner values.
@@ -871,18 +1007,21 @@ mod tests_sync {
             .serialize(&mut buffer, &column, &DataType::List(inner_field), &mut state)
             .unwrap();
 
-        assert_eq!(buffer, vec![
-            // Offsets: [2, 3, 5] (skipping first 0)
-            2, 0, 0, 0, 0, 0, 0, 0, // 2
-            3, 0, 0, 0, 0, 0, 0, 0, // 3
-            5, 0, 0, 0, 0, 0, 0, 0, // 5
-            // Values: [1, 2, 3, 4, 5]
-            1, 0, 0, 0, // 1
-            2, 0, 0, 0, // 2
-            3, 0, 0, 0, // 3
-            4, 0, 0, 0, // 4
-            5, 0, 0, 0, // 5
-        ]);
+        assert_eq!(
+            buffer,
+            vec![
+                // Offsets: [2, 3, 5] (skipping first 0)
+                2, 0, 0, 0, 0, 0, 0, 0, // 2
+                3, 0, 0, 0, 0, 0, 0, 0, // 3
+                5, 0, 0, 0, 0, 0, 0, 0, // 5
+                // Values: [1, 2, 3, 4, 5]
+                1, 0, 0, 0, // 1
+                2, 0, 0, 0, // 2
+                3, 0, 0, 0, // 3
+                4, 0, 0, 0, // 4
+                5, 0, 0, 0, // 5
+            ]
+        );
     }
 
     /// Tests serialization of `Nullable(Array(Int32))` with null arrays.
@@ -902,19 +1041,22 @@ mod tests_sync {
             .serialize(&mut buffer, &column, field.data_type(), &mut state)
             .unwrap();
 
-        assert_eq!(buffer, vec![
-            // Null mask: []
-            // Offsets: [2, 2, 5] (skipping first 0, null array repeats offset)
-            2, 0, 0, 0, 0, 0, 0, 0, // 2
-            2, 0, 0, 0, 0, 0, 0, 0, // 2 (null)
-            5, 0, 0, 0, 0, 0, 0, 0, // 5
-            // Values: [1, 2, 3, 4, 5]
-            1, 0, 0, 0, // 1
-            2, 0, 0, 0, // 2
-            3, 0, 0, 0, // 3
-            4, 0, 0, 0, // 4
-            5, 0, 0, 0, // 5
-        ]);
+        assert_eq!(
+            buffer,
+            vec![
+                // Null mask: []
+                // Offsets: [2, 2, 5] (skipping first 0, null array repeats offset)
+                2, 0, 0, 0, 0, 0, 0, 0, // 2
+                2, 0, 0, 0, 0, 0, 0, 0, // 2 (null)
+                5, 0, 0, 0, 0, 0, 0, 0, // 5
+                // Values: [1, 2, 3, 4, 5]
+                1, 0, 0, 0, // 1
+                2, 0, 0, 0, // 2
+                3, 0, 0, 0, // 3
+                4, 0, 0, 0, // 4
+                5, 0, 0, 0, // 5
+            ]
+        );
     }
 
     /// Tests serialization of `Map(String, Int32)` with non-nullable key-value pairs.
@@ -944,24 +1086,27 @@ mod tests_sync {
             .serialize(&mut buffer, &column, field.data_type(), &mut state)
             .unwrap();
 
-        assert_eq!(buffer, vec![
-            // Offsets: [2, 3, 5] (skipping first 0)
-            2, 0, 0, 0, 0, 0, 0, 0, // 2
-            3, 0, 0, 0, 0, 0, 0, 0, // 3
-            5, 0, 0, 0, 0, 0, 0, 0, // 5
-            // Keys: ["a", "b", "c", "d", "e"]
-            1, b'a', // "a"
-            1, b'b', // "b"
-            1, b'c', // "c"
-            1, b'd', // "d"
-            1, b'e', // "e"
-            // Values: [1, 2, 3, 4, 5]
-            1, 0, 0, 0, // 1
-            2, 0, 0, 0, // 2
-            3, 0, 0, 0, // 3
-            4, 0, 0, 0, // 4
-            5, 0, 0, 0, // 5
-        ]);
+        assert_eq!(
+            buffer,
+            vec![
+                // Offsets: [2, 3, 5] (skipping first 0)
+                2, 0, 0, 0, 0, 0, 0, 0, // 2
+                3, 0, 0, 0, 0, 0, 0, 0, // 3
+                5, 0, 0, 0, 0, 0, 0, 0, // 5
+                // Keys: ["a", "b", "c", "d", "e"]
+                1, b'a', // "a"
+                1, b'b', // "b"
+                1, b'c', // "c"
+                1, b'd', // "d"
+                1, b'e', // "e"
+                // Values: [1, 2, 3, 4, 5]
+                1, 0, 0, 0, // 1
+                2, 0, 0, 0, // 2
+                3, 0, 0, 0, // 3
+                4, 0, 0, 0, // 4
+                5, 0, 0, 0, // 5
+            ]
+        );
     }
 
     /// Tests serialization of `Int32` array with zero rows.

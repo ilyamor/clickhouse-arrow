@@ -82,7 +82,11 @@ pub enum Type {
     Tuple(Vec<Type>),
     Map(Box<Type>, Box<Type>),
 
-    Object,
+    /// JSON/Object type with optional typed paths.
+    /// Typed paths are paths declared in the schema with explicit types, e.g.,
+    /// `JSON(user_id UInt64, action String)` has typed paths `[("user_id", UInt64), ("action", String)]`.
+    /// An empty vector means no typed paths (all paths are dynamic).
+    Object(Vec<(String, Box<Type>)>),
 }
 
 impl Type {
@@ -151,7 +155,9 @@ impl Type {
         }
     }
 
-    pub fn is_nullable(&self) -> bool { matches!(self, Type::Nullable(_)) }
+    pub fn is_nullable(&self) -> bool {
+        matches!(self, Type::Nullable(_))
+    }
 
     pub fn strip_low_cardinality(&self) -> &Type {
         match self {
@@ -211,7 +217,7 @@ impl Type {
             Type::Polygon => Value::Polygon(Polygon::default()),
             Type::MultiPolygon => Value::MultiPolygon(MultiPolygon::default()),
             Type::Uuid => Value::Uuid(Uuid::from_u128(0)),
-            Type::Object => Value::Object("{}".as_bytes().to_vec()),
+            Type::Object(_) => Value::Object("{}".as_bytes().to_vec()),
         }
     }
 }
@@ -285,7 +291,20 @@ impl Display for Type {
             ),
             Type::Nullable(inner) => write!(f, "Nullable({inner})"),
             Type::Map(key, value) => write!(f, "Map({key},{value})"),
-            Type::Object => write!(f, "JSON"),
+            Type::Object(typed_paths) => {
+                if typed_paths.is_empty() {
+                    write!(f, "JSON")
+                } else {
+                    write!(f, "JSON(")?;
+                    for (i, (name, ty)) in typed_paths.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{name} {ty}")?;
+                    }
+                    write!(f, ")")
+                }
+            }
         }
     }
 }
@@ -357,7 +376,7 @@ impl Type {
                     low_cardinality::LowCardinalityDeserializer::read(self, reader, rows, state)
                         .await?
                 }
-                Type::Object => object::ObjectDeserializer::read(self, reader, rows, state).await?,
+                Type::Object(_) => object::ObjectDeserializer::read(self, reader, rows, state).await?,
             })
         }
         .boxed()
@@ -424,7 +443,7 @@ impl Type {
             Type::LowCardinality(_) => {
                 low_cardinality::LowCardinalityDeserializer::read_sync(self, reader, rows, state)?
             }
-            Type::Object => object::ObjectDeserializer::read_sync(self, reader, rows, state)?,
+            Type::Object(_) => object::ObjectDeserializer::read_sync(self, reader, rows, state)?,
         })
     }
 
@@ -494,7 +513,7 @@ impl Type {
                     low_cardinality::LowCardinalitySerializer::write(self, values, writer, state)
                         .await?;
                 }
-                Type::Object => {
+                Type::Object(_) => {
                     object::ObjectSerializer::write(self, values, writer, state).await?;
                 }
             }
@@ -564,7 +583,7 @@ impl Type {
             Type::LowCardinality(_) => {
                 low_cardinality::LowCardinalitySerializer::write_sync(self, values, writer, state)?;
             }
-            Type::Object => {
+            Type::Object(_) => {
                 object::ObjectSerializer::write_sync(self, values, writer, state)?;
             }
         }

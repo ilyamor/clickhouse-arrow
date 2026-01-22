@@ -88,7 +88,7 @@ impl ClickHouseNativeSerializer for Type {
                     low_cardinality::LowCardinalitySerializer::write_prefix(self, writer, state)
                         .await?;
                 }
-                Type::Object => object::ObjectSerializer::write_prefix(self, writer, state).await?,
+                Type::Object(_) => object::ObjectSerializer::write_prefix(self, writer, state).await?,
             }
             Ok(())
         }
@@ -119,8 +119,14 @@ impl ClickHouseNativeSerializer for Type {
                 writer.put_u64_le(LOW_CARDINALITY_VERSION);
                 return;
             }
-            Type::Object => {
-                writer.put_i8(1);
+            Type::Object(_) => {
+                // Check if FLATTENED JSON mode is enabled - if so, skip writing the STRING version
+                // because the FLATTENED serialization will write its own version 3 header
+                let use_flattened = state.options.map(|o| o.use_flattened_json).unwrap_or(false);
+                if !use_flattened {
+                    // STRING version = 1, written as UInt64 LE (8 bytes)
+                    writer.put_u64_le(1);
+                }
                 return;
             }
             _ => return,

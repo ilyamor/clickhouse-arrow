@@ -170,7 +170,7 @@ impl FromSql for String {
                 | Type::FixedSizedString(_)
                 | Type::Binary
                 | Type::FixedSizedBinary(_)
-                | Type::Object
+                | Type::Object(_)
         ) {
             return Err(unexpected_type(type_));
         }
@@ -275,7 +275,7 @@ impl<T: FromSql + Hash + Eq, Y: FromSql, S: ::std::hash::BuildHasher + Default> 
 #[cfg(feature = "serde")]
 impl FromSql for serde_json::Value {
     fn from_sql(type_: &Type, value: Value) -> Result<Self> {
-        if !matches!(type_, Type::Object | Type::String) {
+        if !matches!(type_, Type::Object(_) | Type::String) {
             return Err(unexpected_type(type_));
         }
         match value {

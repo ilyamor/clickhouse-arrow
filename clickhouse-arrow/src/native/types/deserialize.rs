@@ -90,7 +90,7 @@ impl ClickHouseNativeDeserializer for Type {
                     low_cardinality::LowCardinalityDeserializer::read_prefix(self, reader, state)
                         .await?;
                 }
-                Type::Object => {
+                Type::Object(_) => {
                     object::ObjectDeserializer::read_prefix(self, reader, state).await?;
                 }
             }
@@ -125,7 +125,7 @@ impl ClickHouseNativeDeserializer for Type {
                     inner_type.deserialize_prefix(reader)?;
                 }
             }
-            Type::Object => {
+            Type::Object(_) => {
                 let _ = reader.try_get_i8()?;
             }
             _ => {}
@@ -478,6 +478,12 @@ impl FromStr for Type {
                         Box::new(Type::from_str(args[1])?),
                     )
                 }
+                // JSON with typed paths - parse the path definitions
+                // e.g., JSON(field1 String, field2 Int64) -> Type::Object with typed paths
+                "JSON" | "Json" | "Object" | "OBJECT" => {
+                    let typed_paths = parse_json_typed_paths(following)?;
+                    Type::Object(typed_paths)
+                }
                 // Unsupported
                 "Nested" => {
                     return Err(Error::TypeParseError("unsupported Nested type".to_string()));
@@ -517,7 +523,7 @@ impl FromStr for Type {
             "Ring" => Type::Ring,
             "Polygon" => Type::Polygon,
             "MultiPolygon" => Type::MultiPolygon,
-            "Object" | "Json" | "OBJECT" | "JSON" => Type::Object,
+            "Object" | "Json" | "OBJECT" | "JSON" => Type::Object(vec![]),
             _ => {
                 return Err(Error::TypeParseError(format!("invalid type name: '{ident}'")));
             }
@@ -581,7 +587,9 @@ fn parse_fixed_args<const N: usize>(input: &str) -> Result<([&str; N], usize)> {
 }
 
 /// Parse arguments into a Vec for types with variable numbers of args
-fn parse_variable_args(input: &str) -> Result<Vec<&str>> { parse_args_iter(input)?.collect() }
+fn parse_variable_args(input: &str) -> Result<Vec<&str>> {
+    parse_args_iter(input)?.collect()
+}
 
 fn parse_scale(from: &str) -> Result<usize> {
     from.parse().map_err(|_| Error::TypeParseError("couldn't parse scale".to_string()))
@@ -605,11 +613,11 @@ fn parse_args_iter(input: &str) -> Result<impl Iterator<Item = Result<&str, Erro
 }
 
 struct ArgsIterator<'a> {
-    input:      &'a str,
+    input: &'a str,
     last_start: usize,
-    in_parens:  usize,
-    in_quotes:  bool,
-    done:       bool,
+    in_parens: usize,
+    in_quotes: bool,
+    done: bool,
 }
 
 impl<'a> Iterator for ArgsIterator<'a> {
@@ -683,6 +691,63 @@ impl<'a> Iterator for ArgsIterator<'a> {
         self.done = true;
         None
     }
+}
+
+/// Parses JSON typed paths from a JSON type definition like `(field1 String, field2 Int64)`.
+/// Returns an empty vector if the input is empty `()`.
+/// Each typed path is in the form `field_name Type`, e.g., `user_id UInt64`.
+/// This also handles SKIP and SKIP REGEXP clauses which we ignore.
+fn parse_json_typed_paths(input: &str) -> Result<Vec<(String, Box<Type>)>> {
+    if !input.starts_with('(') || !input.ends_with(')') {
+        return Err(Error::TypeParseError(format!("Malformed JSON type arguments: {input}")));
+    }
+
+    let inner = input[1..input.len() - 1].trim();
+    if inner.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut typed_paths = Vec::new();
+
+    for arg_result in parse_args_iter(input)? {
+        let arg = arg_result?.trim();
+
+        // Skip empty arguments
+        if arg.is_empty() {
+            continue;
+        }
+
+        // Skip special clauses like SKIP, SKIP REGEXP, max_dynamic_paths, max_dynamic_types
+        let arg_lower = arg.to_lowercase();
+        if arg_lower.starts_with("skip")
+            || arg_lower.starts_with("max_dynamic_paths")
+            || arg_lower.starts_with("max_dynamic_types")
+        {
+            continue;
+        }
+
+        // Parse "field_name Type" format
+        // First word is the field name, rest is the type
+        if let Some(space_idx) = arg.find(' ') {
+            let field_name = arg[..space_idx].trim().to_string();
+            let type_str = arg[space_idx..].trim();
+
+            // Skip if field name looks like a keyword
+            let field_lower = field_name.to_lowercase();
+            if field_lower == "skip" || field_lower == "max_dynamic_paths" || field_lower == "max_dynamic_types" {
+                continue;
+            }
+
+            let field_type = Type::from_str(type_str)?;
+            typed_paths.push((field_name, Box::new(field_type)));
+        }
+        // If no space, it's not a typed path definition - skip it
+    }
+
+    // Sort typed paths by name for consistent ordering
+    typed_paths.sort_by(|a, b| a.0.cmp(&b.0));
+
+    Ok(typed_paths)
 }
 
 #[cfg(test)]
@@ -876,8 +941,23 @@ mod tests {
             Type::from_str("Map(String, Int32)").unwrap(),
             Type::Map(Box::new(Type::String), Box::new(Type::Int32))
         );
-        assert_eq!(Type::from_str("JSON").unwrap(), Type::Object);
-        assert_eq!(Type::from_str("Object").unwrap(), Type::Object);
+        assert_eq!(Type::from_str("JSON").unwrap(), Type::Object(vec![]));
+        assert_eq!(Type::from_str("Object").unwrap(), Type::Object(vec![]));
+        // JSON with typed paths should parse with typed path info
+        assert_eq!(
+            Type::from_str("JSON(field1 String, field2 Int64)").unwrap(),
+            Type::Object(vec![
+                ("field1".to_string(), Box::new(Type::String)),
+                ("field2".to_string(), Box::new(Type::Int64)),
+            ])
+        );
+        assert_eq!(
+            Type::from_str("JSON(cloud_account_id String, thread_name String)").unwrap(),
+            Type::Object(vec![
+                ("cloud_account_id".to_string(), Box::new(Type::String)),
+                ("thread_name".to_string(), Box::new(Type::String)),
+            ])
+        );
 
         assert!(Type::from_str("LowCardinality()").is_err()); // Missing arg
         assert!(Type::from_str("Array(Int32, String)").is_err()); // Too many args
@@ -913,7 +993,7 @@ mod tests {
             Type::Tuple(vec![Type::Int32, Type::String]),
             Type::Nullable(Box::new(Type::Int32)),
             Type::Map(Box::new(Type::String), Box::new(Type::Int32)),
-            Type::Object,
+            Type::Object(vec![]),
         ];
 
         for ty in types {

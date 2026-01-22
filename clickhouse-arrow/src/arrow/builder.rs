@@ -234,7 +234,7 @@ impl TypedBuilder {
             Type::String => (
                 String, StringBuilder::with_capacity(ROWS, ROWS * 64)
             ),
-            Type::Object => (
+            Type::Object(_) => (
                 Object, StringBuilder::with_capacity(ROWS, ROWS * 1024)
             ),
             Type::FixedSizedString(n) => (
@@ -410,7 +410,7 @@ mod tests {
     fn test_typed_builder_string_binary_types() {
         let test_cases = vec![
             (Type::String, DataType::Utf8),
-            (Type::Object, DataType::Utf8),
+            (Type::Object(vec![]), DataType::Utf8),
             (Type::Binary, DataType::Binary),
             (Type::FixedSizedString(10), DataType::FixedSizeBinary(10)),
             (Type::FixedSizedBinary(16), DataType::FixedSizeBinary(16)),
@@ -423,7 +423,7 @@ mod tests {
             let builder = TypedBuilder::try_new(&type_, &data_type).unwrap();
             match (&type_, &builder) {
                 (Type::String, TypedBuilder::String(_))
-                | (Type::Object, TypedBuilder::Object(_))
+                | (Type::Object(_), TypedBuilder::Object(_))
                 | (Type::Binary, TypedBuilder::Binary(_))
                 | (
                     Type::FixedSizedString(_)
