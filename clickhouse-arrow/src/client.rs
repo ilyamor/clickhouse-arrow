@@ -11,6 +11,7 @@ mod chunk;
 #[cfg(feature = "cloud")]
 mod cloud;
 pub(crate) mod connection;
+mod factory;
 mod internal;
 mod options;
 mod reader;
@@ -31,6 +32,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 pub use self::builder::*;
 pub use self::connection::ConnectionStatus;
+pub use self::factory::*;
 pub(crate) use self::internal::{Message, Operation};
 pub use self::options::*;
 pub use self::response::*;

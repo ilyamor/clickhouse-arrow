@@ -1,5 +1,6 @@
 pub mod arrow;
 pub mod compat;
+pub mod factory;
 pub mod native;
 pub mod params;
 

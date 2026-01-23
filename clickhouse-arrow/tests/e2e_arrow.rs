@@ -77,3 +77,25 @@ e2e_test!(
 // Test named tuple field parsing (issue #85)
 #[cfg(feature = "test-utils")]
 e2e_test!(e2e_arrow_named_tuple, tests::arrow::test_named_tuple_schema, TRACING_DIRECTIVES, None);
+
+// Test ClientFactory basic operations
+#[cfg(feature = "test-utils")]
+e2e_test!(
+    e2e_factory_basic,
+    tests::factory::test_factory_basic_operations,
+    TRACING_DIRECTIVES,
+    None
+);
+
+// Test ClientFactory insert operations
+#[cfg(feature = "test-utils")]
+e2e_test!(e2e_factory_insert, tests::factory::test_factory_insert, TRACING_DIRECTIVES, None);
+
+// Test ClientFactory multiple connections
+#[cfg(feature = "test-utils")]
+e2e_test!(
+    e2e_factory_multiple_connections,
+    tests::factory::test_factory_multiple_connections,
+    TRACING_DIRECTIVES,
+    None
+);

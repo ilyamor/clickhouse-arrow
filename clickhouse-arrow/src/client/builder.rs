@@ -858,6 +858,97 @@ impl ClientBuilder {
             ConnectionManager::<T>::try_new_with_builder(self).await?.with_check(check_health);
         Ok(manager)
     }
+
+    /// Builds a client factory that creates fresh connections per operation.
+    ///
+    /// This method creates a [`ClientFactory<T>`] that creates a new TCP connection
+    /// for each query or insert operation. This is useful for scenarios where you want
+    /// to ensure complete isolation between operations or when working with load balancers
+    /// that benefit from connection rotation.
+    ///
+    /// # Parameters
+    /// - `T`: The client format, either [`NativeFormat`] or [`ArrowFormat`].
+    ///
+    /// # Returns
+    /// A [`Result`] containing the [`ClientFactory<T>`], or an error if verification fails.
+    ///
+    /// # Errors
+    /// - Fails if the destination is unset or invalid.
+    ///
+    /// # Examples
+    /// ```rust,ignore
+    /// use clickhouse_arrow::prelude::*;
+    /// use futures_util::TryStreamExt;
+    ///
+    /// let factory = ClientBuilder::new()
+    ///     .with_endpoint("localhost:9000")
+    ///     .with_username("default")
+    ///     .build_factory::<ArrowFormat>()
+    ///     .await?;
+    ///
+    /// // Each query creates a fresh connection
+    /// let stream = factory.query("SELECT 1", None).await?;
+    /// let batches: Vec<_> = stream.try_collect().await?;
+    /// ```
+    pub async fn build_factory<T: ClientFormat>(self) -> Result<super::ClientFactory<T>> {
+        super::ClientFactory::new(self).await
+    }
+
+    /// Builds an Arrow client factory that creates fresh connections per operation.
+    ///
+    /// This is a convenience method equivalent to `build_factory::<ArrowFormat>()`.
+    ///
+    /// # Returns
+    /// A [`Result`] containing the [`ArrowClientFactory`], or an error if verification fails.
+    ///
+    /// # Errors
+    /// - Fails if the destination is unset or invalid.
+    ///
+    /// # Examples
+    /// ```rust,ignore
+    /// use clickhouse_arrow::prelude::*;
+    /// use futures_util::TryStreamExt;
+    ///
+    /// let factory = ClientBuilder::new()
+    ///     .with_endpoint("localhost:9000")
+    ///     .with_username("default")
+    ///     .build_arrow_factory()
+    ///     .await?;
+    ///
+    /// let stream = factory.query("SELECT 1", None).await?;
+    /// let batches: Vec<_> = stream.try_collect().await?;
+    /// ```
+    pub async fn build_arrow_factory(self) -> Result<super::ArrowClientFactory> {
+        self.build_factory::<ArrowFormat>().await
+    }
+
+    /// Builds a Native client factory that creates fresh connections per operation.
+    ///
+    /// This is a convenience method equivalent to `build_factory::<NativeFormat>()`.
+    ///
+    /// # Returns
+    /// A [`Result`] containing the [`NativeClientFactory`], or an error if verification fails.
+    ///
+    /// # Errors
+    /// - Fails if the destination is unset or invalid.
+    ///
+    /// # Examples
+    /// ```rust,ignore
+    /// use clickhouse_arrow::prelude::*;
+    /// use futures_util::TryStreamExt;
+    ///
+    /// let factory = ClientBuilder::new()
+    ///     .with_endpoint("localhost:9000")
+    ///     .with_username("default")
+    ///     .build_native_factory()
+    ///     .await?;
+    ///
+    /// let stream = factory.query("SELECT 1", None).await?;
+    /// let batches: Vec<_> = stream.try_collect().await?;
+    /// ```
+    pub async fn build_native_factory(self) -> Result<super::NativeClientFactory> {
+        self.build_factory::<NativeFormat>().await
+    }
 }
 
 impl ClientBuilder {

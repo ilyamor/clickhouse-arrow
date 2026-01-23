@@ -78,6 +78,10 @@ pub enum Error {
     InsufficientDDLScope(String),
     #[error("Client error: {0}")]
     Client(String),
+    #[error("No data returned")]
+    NoData,
+    #[error("Type mismatch: {0}")]
+    TypeMismatch(String),
 
     // Other
     #[error("External error: {0}")]
