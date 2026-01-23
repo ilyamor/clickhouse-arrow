@@ -142,9 +142,13 @@ impl<W: ClickHouseWrite> Writer<W> {
     ///
     /// This method is used when the serialization has been done ahead of time
     /// (e.g., in a worker thread) to offload CPU work from the async runtime.
+    ///
+    /// If `already_compressed` is Some, the data is already compressed with that method
+    /// and will be sent directly without re-compression.
     pub(super) async fn send_preserialized_data(
         writer: &mut W,
         data: bytes::Bytes,
+        already_compressed: Option<CompressionMethod>,
         qid: Qid,
         metadata: ClientMetadata,
     ) -> Result<()> {
@@ -153,12 +157,16 @@ impl<W: ClickHouseWrite> Writer<W> {
         writer.write_var_uint(ClientPacketId::Data as u64).await?;
         writer.write_string("").await?; // Table name
 
-        // The data is already serialized, we just need to handle compression
-        if let CompressionMethod::None = metadata.compression {
-            // No compression - write raw bytes
+        // Check if data is already compressed
+        if already_compressed.is_some() {
+            // Data is pre-compressed - write directly
+            // The compressed bytes already include the chunk format header
+            writer.write_all(&data).await?;
+        } else if matches!(metadata.compression, CompressionMethod::None) {
+            // No compression requested - write raw bytes
             writer.write_all(&data).await?;
         } else {
-            // Compress and write
+            // Compress and write (CPU work on tokio thread - legacy path)
             compress_data_sync(writer, data, metadata.compression)
                 .await
                 .inspect_err(|error| error!(?error, { ATT_QID } = %qid, "compressing preserialized data"))?;

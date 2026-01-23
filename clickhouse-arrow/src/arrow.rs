@@ -11,7 +11,7 @@ pub mod utils;
 
 // Re-exports
 pub use arrow;
-pub use block::{SerializedBatch, serialize_record_batch};
+pub use block::{SerializedBatch, serialize_record_batch, serialize_record_batch_compressed};
 pub(crate) use deserialize::ArrowDeserializerState;
 pub use json_assembly::{
     JsonColumnGroup, JsonPath, StructColumnInfo, assemble_json_column, detect_json_groups,

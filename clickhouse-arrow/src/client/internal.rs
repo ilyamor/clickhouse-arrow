@@ -17,7 +17,7 @@ use crate::io::{ClickHouseRead, ClickHouseWrite};
 use crate::native::block::Block;
 use crate::native::block_info::BlockInfo;
 use crate::native::client_info::ClientInfo;
-use crate::native::protocol::{QueryProcessingStage, ServerData, ServerHello, ServerPacket};
+use crate::native::protocol::{CompressionMethod, QueryProcessingStage, ServerData, ServerHello, ServerPacket};
 use crate::prelude::*;
 use crate::query::QueryParams;
 use crate::settings::Settings;
@@ -49,8 +49,13 @@ pub(crate) enum Operation<Data: Send + Sync> {
     #[strum(serialize = "InsertMany")]
     InsertMany { data: Vec<Data>, response: oneshot::Sender<Result<()>> },
     /// Insert pre-serialized data (bytes already in ClickHouse native format)
+    /// If `compression` is Some, the data is already compressed with that method.
     #[strum(serialize = "InsertPreserialized")]
-    InsertPreserialized { data: bytes::Bytes, response: oneshot::Sender<Result<()>> },
+    InsertPreserialized {
+        data: bytes::Bytes,
+        compression: Option<CompressionMethod>,
+        response: oneshot::Sender<Result<()>>,
+    },
 }
 
 // Track operation tasks
@@ -297,8 +302,8 @@ impl<T: ClientFormat> InternalConn<T> {
                 let result = self.send_insert(writer, insert, header, qid).await;
                 (result, response)
             }
-            Operation::InsertPreserialized { data, response } => {
-                let result = self.send_preserialized(writer, data, qid).await;
+            Operation::InsertPreserialized { data, compression, response } => {
+                let result = self.send_preserialized(writer, data, compression, qid).await;
                 (result, response)
             }
         };
@@ -521,15 +526,17 @@ impl<T: ClientFormat> InternalConn<T> {
     }
 
     /// Sends pre-serialized data (bytes already in ClickHouse native format).
+    /// If `already_compressed` is Some, the data is already compressed and should be sent as-is.
     #[instrument(skip_all, fields(clickhouse.query.id = %qid), err)]
     async fn send_preserialized<W: ClickHouseWrite>(
         &self,
         writer: &mut W,
         data: bytes::Bytes,
+        already_compressed: Option<CompressionMethod>,
         qid: Qid,
     ) -> Result<()> {
-        trace!({ ATT_CID } = self.cid, { ATT_QID } = %qid, bytes = data.len(), "Inserting preserialized");
-        Writer::send_preserialized_data(writer, data, qid, self.metadata).await?;
+        trace!({ ATT_CID } = self.cid, { ATT_QID } = %qid, bytes = data.len(), already_compressed = ?already_compressed, "Inserting preserialized");
+        Writer::send_preserialized_data(writer, data, already_compressed, qid, self.metadata).await?;
         self.send_delimiter(writer, qid).await?;
         Ok(())
     }

@@ -332,13 +332,18 @@ impl ClientFactory<ArrowFormat> {
     /// Inserts pre-serialized data into ClickHouse using a fresh connection.
     ///
     /// This method is designed for scenarios where the CPU-intensive serialization
-    /// work has been done ahead of time (e.g., in a dedicated worker thread) using
-    /// [`crate::arrow::serialize_record_batch`]. The pre-serialized bytes are sent
-    /// directly without additional serialization overhead in the async runtime.
+    /// (and optionally compression) work has been done ahead of time (e.g., in a
+    /// dedicated worker thread) using [`crate::arrow::serialize_record_batch`] or
+    /// [`crate::arrow::serialize_record_batch_compressed`].
+    ///
+    /// When using `serialize_record_batch_compressed`, the compression is done on the
+    /// worker thread, and the pre-compressed bytes are sent directly without any
+    /// compression overhead on the async runtime.
     ///
     /// # Parameters
     /// - `query`: The insert query (e.g., `"INSERT INTO my_table FORMAT Native"`).
-    /// - `serialized`: Pre-serialized data from [`crate::arrow::serialize_record_batch`].
+    /// - `serialized`: Pre-serialized data from [`crate::arrow::serialize_record_batch`]
+    ///   or [`crate::arrow::serialize_record_batch_compressed`].
     /// - `qid`: Optional query ID for tracking and debugging.
     ///
     /// # Returns
@@ -351,12 +356,17 @@ impl ClientFactory<ArrowFormat> {
     /// # Example
     /// ```rust,ignore
     /// use clickhouse_arrow::prelude::*;
-    /// use clickhouse_arrow::arrow::{serialize_record_batch, SerializedBatch};
+    /// use clickhouse_arrow::arrow::serialize_record_batch_compressed;
+    /// use clickhouse_arrow::CompressionMethod;
     ///
-    /// // In worker thread: serialize the batch (CPU-intensive)
-    /// let serialized = serialize_record_batch(batch, ArrowOptions::default())?;
+    /// // In worker thread: serialize and compress the batch (CPU-intensive)
+    /// let serialized = serialize_record_batch_compressed(
+    ///     batch,
+    ///     ArrowOptions::default(),
+    ///     CompressionMethod::LZ4
+    /// )?;
     ///
-    /// // In async context: send pre-serialized data (IO only)
+    /// // In async context: send pre-serialized data (IO only, no compression!)
     /// factory.insert_preserialized(
     ///     "INSERT INTO my_table FORMAT Native",
     ///     serialized,
@@ -370,7 +380,7 @@ impl ClientFactory<ArrowFormat> {
         qid: Option<crate::Qid>,
     ) -> Result<()> {
         let client = self.create_client().await?;
-        let stream = client.insert_preserialized(query, serialized.data, qid).await?;
+        let stream = client.insert_preserialized(query, serialized.data, serialized.compression, qid).await?;
         // Drain the stream to completion
         tokio::pin!(stream);
         while let Some(result) = stream.next().await {

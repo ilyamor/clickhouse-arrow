@@ -17,6 +17,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use bytes::Bytes;
 use futures_util::FutureExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
 
@@ -75,7 +76,7 @@ pub(crate) async fn compress_data<W: ClickHouseWrite>(
 #[expect(clippy::cast_possible_truncation)]
 pub(crate) async fn compress_data_sync<W: ClickHouseWrite>(
     writer: &mut W,
-    raw: bytes::Bytes,
+    raw: Bytes,
     compression: CompressionMethod,
 ) -> Result<()> {
     let decompressed_size = raw.len();
@@ -101,6 +102,53 @@ pub(crate) async fn compress_data_sync<W: ClickHouseWrite>(
     writer.write_all(&new_out[..]).await?;
 
     Ok(())
+}
+
+/// Compresses data synchronously and returns the compressed bytes.
+///
+/// This function is designed for use in worker threads where the CPU-intensive
+/// compression work can be done before handing off to the async runtime.
+/// The returned bytes include the ClickHouse chunk format header (checksum + metadata).
+///
+/// # Arguments
+/// * `raw` - The raw data to compress
+/// * `compression` - The compression method to use (LZ4, ZSTD, or None)
+///
+/// # Returns
+/// The compressed data with ClickHouse chunk format header, or None if compression is disabled.
+#[expect(clippy::cast_possible_truncation)]
+pub(crate) fn compress_data_to_bytes(raw: &[u8], compression: CompressionMethod) -> Result<Option<Bytes>> {
+    if matches!(compression, CompressionMethod::None) {
+        return Ok(None);
+    }
+
+    let decompressed_size = raw.len();
+    let mut out = match compression {
+        CompressionMethod::ZSTD => zstd::bulk::compress(raw, 1)
+            .map_err(|e| Error::SerializeError(format!("ZSTD compress error: {e}")))?,
+        CompressionMethod::LZ4 => lz4_flex::compress(raw),
+        CompressionMethod::None => unreachable!(),
+    };
+
+    // Build the chunk: [checksum (16)] [type (1)] [compressed_size (4)] [decompressed_size (4)] [payload]
+    let mut chunk = Vec::with_capacity(16 + 9 + out.len());
+
+    // First build the header + payload (without checksum) to compute the hash
+    let mut header_and_payload = Vec::with_capacity(9 + out.len());
+    header_and_payload.push(compression.byte());
+    header_and_payload.extend_from_slice(&(out.len() as u32 + 9).to_le_bytes()[..]);
+    header_and_payload.extend_from_slice(&(decompressed_size as u32).to_le_bytes()[..]);
+    header_and_payload.append(&mut out);
+
+    // Compute checksum of header + payload
+    let hash = cityhash_rs::cityhash_102_128(&header_and_payload[..]);
+
+    // Build final chunk: checksum + header + payload
+    chunk.extend_from_slice(&((hash >> 64) as u64).to_le_bytes()[..]);
+    chunk.extend_from_slice(&(hash as u64).to_le_bytes()[..]);
+    chunk.extend_from_slice(&header_and_payload);
+
+    Ok(Some(Bytes::from(chunk)))
 }
 
 /// Reads and decompresses a single compression chunk.

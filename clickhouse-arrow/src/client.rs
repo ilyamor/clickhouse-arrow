@@ -613,7 +613,11 @@ impl<T: ClientFormat> Client<T> {
     /// This method sends an insert query with pre-serialized data (bytes already in
     /// ClickHouse's native format). Use this when the CPU-intensive serialization work
     /// has been done ahead of time (e.g., in a worker thread) using
-    /// [`crate::arrow::serialize_record_batch`].
+    /// [`crate::arrow::serialize_record_batch`] or [`crate::arrow::serialize_record_batch_compressed`].
+    ///
+    /// If the data was created with `serialize_record_batch_compressed`, pass the
+    /// `compression` field from the `SerializedBatch` to avoid re-compression on the
+    /// async runtime.
     ///
     /// Progress and profile events are dispatched to the client's event channel (see
     /// [`Client::subscribe_events`]). The returned stream yields `()` on success or an
@@ -622,6 +626,7 @@ impl<T: ClientFormat> Client<T> {
     /// # Parameters
     /// - `query`: The insert query (e.g., `"INSERT INTO my_table FORMAT Native"`).
     /// - `data`: Pre-serialized data bytes from [`crate::arrow::serialize_record_batch`].
+    /// - `compression`: If Some, indicates the data is already compressed with this method.
     /// - `qid`: Optional query ID for tracking and debugging.
     ///
     /// # Returns
@@ -636,15 +641,16 @@ impl<T: ClientFormat> Client<T> {
     /// # Example
     /// ```rust,ignore
     /// use clickhouse_arrow::prelude::*;
-    /// use clickhouse_arrow::arrow::serialize_record_batch;
+    /// use clickhouse_arrow::arrow::serialize_record_batch_compressed;
     ///
-    /// // Serialize in worker thread
-    /// let serialized = serialize_record_batch(batch, ArrowOptions::default())?;
+    /// // Serialize and compress in worker thread
+    /// let serialized = serialize_record_batch_compressed(batch, ArrowOptions::default(), CompressionMethod::LZ4)?;
     ///
-    /// // Insert pre-serialized data
+    /// // Insert pre-serialized data (no compression on async runtime!)
     /// let stream = client.insert_preserialized(
     ///     "INSERT INTO my_table FORMAT Native",
     ///     serialized.data,
+    ///     serialized.compression,
     ///     None
     /// ).await?;
     /// ```
@@ -663,6 +669,7 @@ impl<T: ClientFormat> Client<T> {
         &self,
         query: impl Into<ParsedQuery>,
         data: bytes::Bytes,
+        compression: Option<CompressionMethod>,
         qid: Option<Qid>,
     ) -> Result<impl Stream<Item = Result<()>> + '_> {
         let (query, qid) = record_query(qid, query.into(), self.client_id);
@@ -700,7 +707,7 @@ impl<T: ClientFormat> Client<T> {
         // Send pre-serialized data
         let (tx, rx) = oneshot::channel();
         let _ = connection
-            .send_operation(Operation::InsertPreserialized { data, response: tx }, qid, true)
+            .send_operation(Operation::InsertPreserialized { data, compression, response: tx }, qid, true)
             .await?;
         rx.await.map_err(|_| {
             Error::Protocol(format!("Failed to receive response from insert {qid}"))

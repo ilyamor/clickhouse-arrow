@@ -25,6 +25,7 @@ use crate::native::block_info::BlockInfo;
 use crate::native::protocol::DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION;
 use crate::prelude::*;
 use crate::serialize::ClickHouseNativeSerializer;
+use crate::native::protocol::CompressionMethod;
 use crate::{ArrowOptions, Result, Type};
 
 /// Implementation of `ProtocolData` for Arrow `RecordBatch`es.
@@ -376,10 +377,12 @@ impl ProtocolData<RecordBatch, ArrowDeserializerState> for RecordBatch {
 /// ```
 #[derive(Debug, Clone)]
 pub struct SerializedBatch {
-    /// The serialized data in ClickHouse native format
+    /// The serialized data in ClickHouse native format (possibly compressed)
     pub data: bytes::Bytes,
     /// Number of rows in the batch (for logging/metrics)
     pub num_rows: usize,
+    /// If Some, the data is already compressed with this method
+    pub compression: Option<CompressionMethod>,
 }
 
 /// Serializes a RecordBatch to ClickHouse's native format bytes.
@@ -422,7 +425,67 @@ pub fn serialize_record_batch(
     Ok(SerializedBatch {
         data: buffer.freeze(),
         num_rows,
+        compression: None,
     })
+}
+
+/// Serializes and compresses a RecordBatch to ClickHouse's native format bytes.
+///
+/// This function performs both CPU-intensive serialization and compression in a single
+/// call, designed to run in a worker thread. The resulting bytes are ready to be sent
+/// directly to ClickHouse without additional compression on the async runtime.
+///
+/// # Arguments
+/// * `batch` - The RecordBatch to serialize
+/// * `options` - Arrow serialization options (e.g., string handling, JSON assembly)
+/// * `compression` - The compression method to use (LZ4, ZSTD, or None)
+///
+/// # Returns
+/// A `SerializedBatch` containing the compressed bytes and metadata.
+///
+/// # Example
+/// ```rust,ignore
+/// use clickhouse_arrow::arrow::block::serialize_record_batch_compressed;
+/// use clickhouse_arrow::{ArrowOptions, CompressionMethod};
+///
+/// let batch = create_record_batch();
+/// let serialized = serialize_record_batch_compressed(
+///     batch,
+///     ArrowOptions::default(),
+///     CompressionMethod::LZ4
+/// )?;
+/// // serialized.data is already compressed - send directly without re-compression
+/// ```
+pub fn serialize_record_batch_compressed(
+    batch: RecordBatch,
+    options: ArrowOptions,
+    compression: CompressionMethod,
+) -> Result<SerializedBatch> {
+    use bytes::BytesMut;
+    use crate::compression::compress_data_to_bytes;
+    use crate::native::protocol::DBMS_TCP_PROTOCOL_VERSION;
+
+    let num_rows = batch.num_rows();
+    let mut buffer = BytesMut::with_capacity(batch.get_array_memory_size());
+
+    // Serialize to buffer
+    batch.write(&mut buffer, DBMS_TCP_PROTOCOL_VERSION, None, options)?;
+
+    // Compress if requested
+    if let Some(compressed) = compress_data_to_bytes(&buffer, compression)? {
+        Ok(SerializedBatch {
+            data: compressed,
+            num_rows,
+            compression: Some(compression),
+        })
+    } else {
+        // No compression requested
+        Ok(SerializedBatch {
+            data: buffer.freeze(),
+            num_rows,
+            compression: None,
+        })
+    }
 }
 
 #[cfg(test)]
