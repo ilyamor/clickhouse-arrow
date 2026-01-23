@@ -138,6 +138,40 @@ impl<W: ClickHouseWrite> Writer<W> {
         Ok(())
     }
 
+    /// Sends pre-serialized data (bytes already in ClickHouse native format).
+    ///
+    /// This method is used when the serialization has been done ahead of time
+    /// (e.g., in a worker thread) to offload CPU work from the async runtime.
+    pub(super) async fn send_preserialized_data(
+        writer: &mut W,
+        data: bytes::Bytes,
+        qid: Qid,
+        metadata: ClientMetadata,
+    ) -> Result<()> {
+        use crate::compression::compress_data_sync;
+
+        writer.write_var_uint(ClientPacketId::Data as u64).await?;
+        writer.write_string("").await?; // Table name
+
+        // The data is already serialized, we just need to handle compression
+        if let CompressionMethod::None = metadata.compression {
+            // No compression - write raw bytes
+            writer.write_all(&data).await?;
+        } else {
+            // Compress and write
+            compress_data_sync(writer, data, metadata.compression)
+                .await
+                .inspect_err(|error| error!(?error, { ATT_QID } = %qid, "compressing preserialized data"))?;
+        }
+
+        writer
+            .flush()
+            .instrument(trace_span!("flush_preserialized_data", { ATT_QID } = %qid))
+            .await
+            .inspect_err(|error| error!(?error, { ATT_QID } = %qid, "send_preserialized_data"))?;
+        Ok(())
+    }
+
     pub(super) async fn send_addendum(
         writer: &mut W,
         revision: u64,

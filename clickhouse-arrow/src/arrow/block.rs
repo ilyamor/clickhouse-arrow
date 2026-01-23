@@ -357,6 +357,74 @@ impl ProtocolData<RecordBatch, ArrowDeserializerState> for RecordBatch {
     }
 }
 
+/// A pre-serialized RecordBatch ready for sending to ClickHouse.
+///
+/// This struct holds the serialized bytes of a RecordBatch in ClickHouse's native format.
+/// Use this to offload the CPU-intensive serialization work to a worker thread,
+/// then send the pre-serialized data over the network from an async context.
+///
+/// # Example
+/// ```rust,ignore
+/// use clickhouse_arrow::arrow::block::serialize_record_batch;
+/// use clickhouse_arrow::ArrowOptions;
+///
+/// // In worker thread: serialize the batch
+/// let serialized = serialize_record_batch(batch, ArrowOptions::default())?;
+///
+/// // In async context: send pre-serialized data
+/// factory.insert_preserialized(query, serialized, None).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct SerializedBatch {
+    /// The serialized data in ClickHouse native format
+    pub data: bytes::Bytes,
+    /// Number of rows in the batch (for logging/metrics)
+    pub num_rows: usize,
+}
+
+/// Serializes a RecordBatch to ClickHouse's native format bytes.
+///
+/// This function performs the CPU-intensive work of converting an Arrow RecordBatch
+/// into ClickHouse's native wire format. Call this in a worker thread to offload
+/// the serialization work from the async runtime.
+///
+/// # Arguments
+/// * `batch` - The RecordBatch to serialize
+/// * `options` - Arrow serialization options (e.g., string handling, JSON assembly)
+///
+/// # Returns
+/// A `SerializedBatch` containing the serialized bytes and metadata.
+///
+/// # Example
+/// ```rust,ignore
+/// use clickhouse_arrow::arrow::block::serialize_record_batch;
+/// use clickhouse_arrow::ArrowOptions;
+///
+/// let batch = create_record_batch();
+/// let serialized = serialize_record_batch(batch, ArrowOptions::default())?;
+/// println!("Serialized {} rows into {} bytes", serialized.num_rows, serialized.data.len());
+/// ```
+pub fn serialize_record_batch(
+    batch: RecordBatch,
+    options: ArrowOptions,
+) -> Result<SerializedBatch> {
+    use bytes::BytesMut;
+    use crate::native::protocol::DBMS_TCP_PROTOCOL_VERSION;
+
+    let num_rows = batch.num_rows();
+    let mut buffer = BytesMut::with_capacity(batch.get_array_memory_size());
+
+    // Use the sync write method which writes to a BytesMut buffer
+    // revision = DBMS_TCP_PROTOCOL_VERSION for proper block info and custom serialization support
+    // header = None (no typed JSON path hints needed for standalone serialization)
+    batch.write(&mut buffer, DBMS_TCP_PROTOCOL_VERSION, None, options)?;
+
+    Ok(SerializedBatch {
+        data: buffer.freeze(),
+        num_rows,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;

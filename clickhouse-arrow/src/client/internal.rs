@@ -48,6 +48,9 @@ pub(crate) enum Operation<Data: Send + Sync> {
     Insert { data: Data, response: oneshot::Sender<Result<()>> },
     #[strum(serialize = "InsertMany")]
     InsertMany { data: Vec<Data>, response: oneshot::Sender<Result<()>> },
+    /// Insert pre-serialized data (bytes already in ClickHouse native format)
+    #[strum(serialize = "InsertPreserialized")]
+    InsertPreserialized { data: bytes::Bytes, response: oneshot::Sender<Result<()>> },
 }
 
 // Track operation tasks
@@ -294,6 +297,10 @@ impl<T: ClientFormat> InternalConn<T> {
                 let result = self.send_insert(writer, insert, header, qid).await;
                 (result, response)
             }
+            Operation::InsertPreserialized { data, response } => {
+                let result = self.send_preserialized(writer, data, qid).await;
+                (result, response)
+            }
         };
 
         // Return result to caller
@@ -512,6 +519,20 @@ impl<T: ClientFormat> InternalConn<T> {
         )
         .await
     }
+
+    /// Sends pre-serialized data (bytes already in ClickHouse native format).
+    #[instrument(skip_all, fields(clickhouse.query.id = %qid), err)]
+    async fn send_preserialized<W: ClickHouseWrite>(
+        &self,
+        writer: &mut W,
+        data: bytes::Bytes,
+        qid: Qid,
+    ) -> Result<()> {
+        trace!({ ATT_CID } = self.cid, { ATT_QID } = %qid, bytes = data.len(), "Inserting preserialized");
+        Writer::send_preserialized_data(writer, data, qid, self.metadata).await?;
+        self.send_delimiter(writer, qid).await?;
+        Ok(())
+    }
 }
 
 #[cfg(feature = "inner_pool")]
@@ -521,7 +542,7 @@ impl<Data: Send + Sync + 'static> Operation<Data> {
         match self {
             Operation::Query { .. } if finished => 1,
             Operation::Query { .. } | Operation::InsertMany { .. } => 3,
-            Operation::Insert { .. } => 2,
+            Operation::Insert { .. } | Operation::InsertPreserialized { .. } => 2,
             Operation::Ping { .. } => 0,
         }
     }

@@ -328,6 +328,56 @@ impl ClientFactory<ArrowFormat> {
         let column = batch.column(0);
         V::extract(column, 0)
     }
+
+    /// Inserts pre-serialized data into ClickHouse using a fresh connection.
+    ///
+    /// This method is designed for scenarios where the CPU-intensive serialization
+    /// work has been done ahead of time (e.g., in a dedicated worker thread) using
+    /// [`crate::arrow::serialize_record_batch`]. The pre-serialized bytes are sent
+    /// directly without additional serialization overhead in the async runtime.
+    ///
+    /// # Parameters
+    /// - `query`: The insert query (e.g., `"INSERT INTO my_table FORMAT Native"`).
+    /// - `serialized`: Pre-serialized data from [`crate::arrow::serialize_record_batch`].
+    /// - `qid`: Optional query ID for tracking and debugging.
+    ///
+    /// # Returns
+    /// A `Result` indicating success or failure of the insert operation.
+    ///
+    /// # Errors
+    /// - Fails if the connection cannot be established.
+    /// - Fails if the insert operation fails.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use clickhouse_arrow::prelude::*;
+    /// use clickhouse_arrow::arrow::{serialize_record_batch, SerializedBatch};
+    ///
+    /// // In worker thread: serialize the batch (CPU-intensive)
+    /// let serialized = serialize_record_batch(batch, ArrowOptions::default())?;
+    ///
+    /// // In async context: send pre-serialized data (IO only)
+    /// factory.insert_preserialized(
+    ///     "INSERT INTO my_table FORMAT Native",
+    ///     serialized,
+    ///     None
+    /// ).await?;
+    /// ```
+    pub async fn insert_preserialized(
+        &self,
+        query: impl Into<ParsedQuery>,
+        serialized: crate::arrow::SerializedBatch,
+        qid: Option<crate::Qid>,
+    ) -> Result<()> {
+        let client = self.create_client().await?;
+        let stream = client.insert_preserialized(query, serialized.data, qid).await?;
+        // Drain the stream to completion
+        tokio::pin!(stream);
+        while let Some(result) = stream.next().await {
+            result?;
+        }
+        Ok(())
+    }
 }
 
 impl ClientFactory<NativeFormat> {

@@ -295,7 +295,7 @@ impl<T: ClientFormat> Connection<T> {
         #[cfg(feature = "inner_pool")]
         let conn_idx = {
             let key = (matches!(op, Operation::Query { .. } if !finished)
-                || matches!(op, Operation::Insert { .. } | Operation::InsertMany { .. }))
+                || matches!(op, Operation::Insert { .. } | Operation::InsertMany { .. } | Operation::InsertPreserialized { .. }))
             .then(|| qid.key());
             self.load_balancer.assign(key, op.weight(finished) as usize)
         };

@@ -608,6 +608,111 @@ impl<T: ClientFormat> Client<T> {
         Ok(self.insert_response(responses, qid))
     }
 
+    /// Inserts pre-serialized data into `ClickHouse`.
+    ///
+    /// This method sends an insert query with pre-serialized data (bytes already in
+    /// ClickHouse's native format). Use this when the CPU-intensive serialization work
+    /// has been done ahead of time (e.g., in a worker thread) using
+    /// [`crate::arrow::serialize_record_batch`].
+    ///
+    /// Progress and profile events are dispatched to the client's event channel (see
+    /// [`Client::subscribe_events`]). The returned stream yields `()` on success or an
+    /// error if the insert fails.
+    ///
+    /// # Parameters
+    /// - `query`: The insert query (e.g., `"INSERT INTO my_table FORMAT Native"`).
+    /// - `data`: Pre-serialized data bytes from [`crate::arrow::serialize_record_batch`].
+    /// - `qid`: Optional query ID for tracking and debugging.
+    ///
+    /// # Returns
+    /// A [`Result`] containing a stream of [`Result<()>`], where each item indicates
+    /// the success or failure of processing response data.
+    ///
+    /// # Errors
+    /// - Fails if the query is malformed.
+    /// - Fails if the connection to `ClickHouse` is interrupted.
+    /// - Fails if `ClickHouse` returns an exception.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use clickhouse_arrow::prelude::*;
+    /// use clickhouse_arrow::arrow::serialize_record_batch;
+    ///
+    /// // Serialize in worker thread
+    /// let serialized = serialize_record_batch(batch, ArrowOptions::default())?;
+    ///
+    /// // Insert pre-serialized data
+    /// let stream = client.insert_preserialized(
+    ///     "INSERT INTO my_table FORMAT Native",
+    ///     serialized.data,
+    ///     None
+    /// ).await?;
+    /// ```
+    #[instrument(
+        name = "clickhouse.insert_preserialized",
+        skip_all,
+        fields(
+            db.system = "clickhouse",
+            db.operation = "insert",
+            db.format = T::FORMAT,
+            clickhouse.client.id = self.client_id,
+            clickhouse.query.id
+        ),
+    )]
+    pub async fn insert_preserialized(
+        &self,
+        query: impl Into<ParsedQuery>,
+        data: bytes::Bytes,
+        qid: Option<Qid>,
+    ) -> Result<impl Stream<Item = Result<()>> + '_> {
+        let (query, qid) = record_query(qid, query.into(), self.client_id);
+
+        // Create metadata channel
+        let (tx, rx) = oneshot::channel();
+        // Create header channel to receive table schema
+        let (header_tx, header_rx) = oneshot::channel();
+        let connection = self.conn().await?;
+
+        #[cfg_attr(not(feature = "inner_pool"), expect(unused_variables))]
+        let conn_idx = connection
+            .send_operation(
+                Operation::Query {
+                    query,
+                    settings: self.settings.clone(),
+                    params: None,
+                    response: tx,
+                    header: Some(header_tx),
+                },
+                qid,
+                false,
+            )
+            .await?;
+
+        trace!({ ATT_CID } = self.client_id, { ATT_QID } = %qid, "sent query, awaiting response");
+        let responses = rx
+            .await
+            .map_err(|_| Error::Protocol(format!("Failed to receive response for query {qid}")))?
+            .inspect_err(|error| error!(?error, { ATT_QID } = %qid, "Error receiving header"))?;
+
+        // Wait for header
+        let _header = header_rx.await.ok();
+
+        // Send pre-serialized data
+        let (tx, rx) = oneshot::channel();
+        let _ = connection
+            .send_operation(Operation::InsertPreserialized { data, response: tx }, qid, true)
+            .await?;
+        rx.await.map_err(|_| {
+            Error::Protocol(format!("Failed to receive response from insert {qid}"))
+        })??;
+
+        // Decrement load balancer
+        #[cfg(feature = "inner_pool")]
+        connection.finish(conn_idx, Operation::<T::Data>::weight_insert());
+
+        Ok(self.insert_response(responses, qid))
+    }
+
     /// Executes a raw `ClickHouse` query and streams raw data in the client's format.
     ///
     /// This method sends a query to `ClickHouse` and returns a stream of raw data blocks
