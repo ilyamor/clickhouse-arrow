@@ -2,7 +2,6 @@ pub mod arrow;
 pub mod compat;
 pub mod factory;
 pub mod native;
-pub mod oneshot;
 pub mod params;
 
 use std::panic::AssertUnwindSafe;

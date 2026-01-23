@@ -195,7 +195,6 @@ mod flags;
 mod formats;
 mod io;
 pub mod native;
-pub mod oneshot;
 #[cfg(feature = "pool")]
 mod pool;
 pub mod prelude;

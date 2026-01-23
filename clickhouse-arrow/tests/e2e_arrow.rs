@@ -99,15 +99,3 @@ e2e_test!(
     TRACING_DIRECTIVES,
     None
 );
-
-// Test oneshot query
-#[cfg(feature = "test-utils")]
-e2e_test!(e2e_oneshot_query, tests::oneshot::test_oneshot_query, TRACING_DIRECTIVES, None);
-
-// Test oneshot scalar
-#[cfg(feature = "test-utils")]
-e2e_test!(e2e_oneshot_scalar, tests::oneshot::test_oneshot_scalar, TRACING_DIRECTIVES, None);
-
-// Test oneshot insert
-#[cfg(feature = "test-utils")]
-e2e_test!(e2e_oneshot_insert, tests::oneshot::test_oneshot_insert, TRACING_DIRECTIVES, None);
