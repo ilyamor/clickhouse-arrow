@@ -25,19 +25,21 @@
 //! ```
 
 use std::marker::PhantomData;
+use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use arrow::array::RecordBatch;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use pin_project::pin_project;
 
-use super::builder::ClientBuilder;
 use super::response::ClickHouseResponse;
-use super::Client;
+use super::{Client, ClientOptions, ConnectionContext, Destination};
 use crate::formats::{ArrowFormat, ClientFormat, NativeFormat};
 use crate::native::block::Block;
 use crate::query::ParsedQuery;
+use crate::settings::Settings;
 use crate::Result;
 
 /// Type alias for an Arrow-based client factory.
@@ -45,6 +47,19 @@ pub type ArrowClientFactory = ClientFactory<ArrowFormat>;
 
 /// Type alias for a Native-based client factory.
 pub type NativeClientFactory = ClientFactory<NativeFormat>;
+
+/// Resolved connection parameters stored efficiently for repeated use.
+#[derive(Debug, Clone)]
+struct ConnectionParams {
+    /// Pre-resolved socket addresses (no DNS lookup needed)
+    addrs: Arc<[SocketAddr]>,
+    /// Connection options (Arc-wrapped to avoid cloning)
+    options: Arc<ClientOptions>,
+    /// Optional settings (already Arc-wrapped)
+    settings: Option<Arc<Settings>>,
+    /// Optional connection context
+    context: Option<ConnectionContext>,
+}
 
 /// A factory that creates fresh TCP connections for each operation.
 ///
@@ -77,16 +92,16 @@ pub type NativeClientFactory = ClientFactory<NativeFormat>;
 /// ```
 #[derive(Debug, Clone)]
 pub struct ClientFactory<T: ClientFormat> {
-    builder: ClientBuilder,
+    params: ConnectionParams,
     _phantom: PhantomData<T>,
 }
 
 impl<T: ClientFormat> ClientFactory<T> {
-    /// Creates a new `ClientFactory` from a verified `ClientBuilder`.
+    /// Creates a new `ClientFactory` from a `ClientBuilder`.
     ///
     /// The builder is verified to ensure the destination is valid before
-    /// the factory is created. This allows subsequent operations to create
-    /// connections without re-validating the destination.
+    /// the factory is created. Connection parameters are resolved once and
+    /// stored efficiently for repeated use.
     ///
     /// # Parameters
     /// - `builder`: A `ClientBuilder` with connection parameters configured.
@@ -108,20 +123,50 @@ impl<T: ClientFormat> ClientFactory<T> {
     ///
     /// let factory = ClientFactory::<ArrowFormat>::new(builder).await?;
     /// ```
-    pub async fn new(builder: ClientBuilder) -> Result<Self> {
-        // Verify the builder to ensure destination is valid
-        let verified_builder = if builder.verified() {
+    pub async fn new(builder: super::ClientBuilder) -> Result<Self> {
+        // Verify the builder to resolve destination
+        let verified = if builder.verified() {
             builder
         } else {
             builder.verify().await?
         };
 
-        Ok(Self { builder: verified_builder, _phantom: PhantomData })
+        // Extract and store resolved parameters efficiently
+        let destination = verified.destination().expect("verified builder has destination");
+        let addrs: Arc<[SocketAddr]> = destination
+            .resolve(verified.options().ipv4_only)
+            .await?
+            .into();
+
+        // Configure options for single connection (no inner pool)
+        let mut options = verified.options().clone();
+        options.ext.fast_mode_size = Some(1); // Single connection per client
+
+        let params = ConnectionParams {
+            addrs,
+            options: Arc::new(options),
+            settings: verified.settings().cloned().map(Arc::new),
+            context: None, // Context is typically per-request anyway
+        };
+
+        Ok(Self { params, _phantom: PhantomData })
     }
 
     /// Creates a fresh connection and returns the client.
+    ///
+    /// This is optimized to avoid redundant work:
+    /// - Uses pre-resolved addresses (no DNS lookup)
+    /// - Uses Arc-wrapped options (cheap clone)
+    /// - Configures single connection (no inner pool overhead)
     async fn create_client(&self) -> Result<Client<T>> {
-        self.builder.clone().build::<T>().await
+        // Clone is cheap: addrs is Arc, options is Arc, settings is Option<Arc>
+        Client::connect(
+            Destination::from(self.params.addrs.to_vec()),
+            (*self.params.options).clone(),
+            self.params.settings.clone(),
+            self.params.context.clone(),
+        )
+        .await
     }
 
     /// Executes an insert query with a single data block using a fresh connection.
@@ -514,6 +559,7 @@ impl ScalarValue for f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ClientBuilder;
 
     #[tokio::test]
     async fn test_factory_requires_verified_builder() {
